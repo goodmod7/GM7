@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { apiFetch, getBillingStatus, getMe, getSessions, logout, logoutAllSessions, type BillingStatus, type BrowserSession } from '../../lib/auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001';
 
@@ -24,6 +26,11 @@ interface Device {
     updatedAt: number;
     requestedBy?: string;
   };
+  // Iteration 8: Workspace state
+  workspaceState?: {
+    configured: boolean;
+    rootName?: string;
+  };
 }
 
 interface LogLine {
@@ -41,6 +48,40 @@ interface RunStep {
   logs: LogLine[];
 }
 
+// Iteration 6: Agent Proposal types
+interface ProposeActionProposal {
+  kind: 'propose_action';
+  action: {
+    kind: 'click' | 'double_click' | 'scroll' | 'type' | 'hotkey';
+    [key: string]: unknown;
+  };
+  rationale: string;
+  confidence?: number;
+}
+
+interface ProposeToolProposal {
+  kind: 'propose_tool';
+  toolCall: {
+    tool: 'fs.list' | 'fs.read_text' | 'fs.write_text' | 'fs.apply_patch' | 'terminal.exec';
+    path?: string;
+    cmd?: string;
+  };
+  rationale: string;
+  confidence?: number;
+}
+
+interface AskUserProposal {
+  kind: 'ask_user';
+  question: string;
+}
+
+interface DoneProposal {
+  kind: 'done';
+  summary: string;
+}
+
+type AgentProposal = ProposeActionProposal | ProposeToolProposal | AskUserProposal | DoneProposal;
+
 interface Run {
   runId: string;
   deviceId: string;
@@ -50,6 +91,15 @@ interface Run {
   updatedAt: number;
   reason?: string;
   steps: RunStep[];
+  // Iteration 6: AI Assist fields
+  mode?: 'manual' | 'ai_assist';
+  constraints?: {
+    maxActions: number;
+    maxRuntimeMinutes: number;
+  };
+  actionCount?: number;
+  lastAgentEventAt?: number;
+  latestProposal?: AgentProposal;
 }
 
 interface ScreenFrameMeta {
@@ -72,10 +122,32 @@ interface DeviceAction {
   createdAt: number;
   updatedAt: number;
   error?: { code: string; message: string };
+  source?: 'web' | 'agent';
+  runId?: string;
+}
+
+// Iteration 8: Tool Summary type
+type ToolEventStatus = 'requested' | 'awaiting_user' | 'approved' | 'denied' | 'executed' | 'failed';
+
+interface ToolSummary {
+  toolEventId: string;
+  toolCallId: string;
+  runId?: string;
+  deviceId: string;
+  tool: 'fs.list' | 'fs.read_text' | 'fs.write_text' | 'fs.apply_patch' | 'terminal.exec';
+  pathRel?: string;
+  cmd?: string;
+  status: ToolEventStatus;
+  exitCode?: number;
+  truncated?: boolean;
+  bytesWritten?: number;
+  hunksApplied?: number;
+  errorCode?: string;
+  at: number;
 }
 
 interface SSEEvent {
-  type: 'connected' | 'device_update' | 'run_update' | 'step_update' | 'log_line' | 'screen_update' | 'action_update';
+  type: 'connected' | 'device_update' | 'run_update' | 'step_update' | 'log_line' | 'screen_update' | 'action_update' | 'tool_update';
   run?: Run;
   step?: RunStep;
   runId?: string;
@@ -85,6 +157,7 @@ interface SSEEvent {
   deviceId?: string;
   meta?: ScreenFrameMeta;
   action?: DeviceAction;
+  tool?: ToolSummary;
 }
 
 const hotkeyBtnStyle: React.CSSProperties = {
@@ -97,6 +170,7 @@ const hotkeyBtnStyle: React.CSSProperties = {
 };
 
 export default function Dashboard() {
+  const router = useRouter();
   const [devices, setDevices] = useState<Device[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
@@ -106,6 +180,7 @@ export default function Dashboard() {
   const [pairingLoading, setPairingLoading] = useState<Record<string, boolean>>({});
   const [newRunGoal, setNewRunGoal] = useState('');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [selectedRunMode, setSelectedRunMode] = useState<'manual' | 'ai_assist'>('manual');
   
   // Screen preview state
   const [previewDeviceId, setPreviewDeviceId] = useState<string | null>(null);
@@ -115,36 +190,96 @@ export default function Dashboard() {
   // Control state
   const [actions, setActions] = useState<DeviceAction[]>([]);
   const [typeText, setTypeText] = useState('');
+  
+  // Iteration 8: Tool timeline state (per runId)
+  const [runTools, setRunTools] = useState<Record<string, ToolSummary[]>>({});
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<BrowserSession[]>([]);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    void (async () => {
+      try {
+        const user = await getMe();
+        if (!active) {
+          return;
+        }
+
+        if (!user) {
+          router.replace('/login');
+          return;
+        }
+
+        setUserEmail(user.email);
+        setAuthReady(true);
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Failed to load session');
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [router]);
 
   // Fetch initial data
   const fetchInitialData = useCallback(async () => {
+    if (!authReady) return;
     try {
       setError(null);
       
-      const devicesRes = await fetch(`${API_BASE}/devices`);
+      const devicesRes = await apiFetch('/devices');
+      if (devicesRes.status === 401) {
+        router.replace('/login');
+        return;
+      }
       if (!devicesRes.ok) throw new Error('Failed to fetch devices');
       const devicesData = await devicesRes.json();
       setDevices(devicesData.devices || []);
 
-      const runsRes = await fetch(`${API_BASE}/runs`);
+      const runsRes = await apiFetch('/runs');
+      if (runsRes.status === 401) {
+        router.replace('/login');
+        return;
+      }
       if (!runsRes.ok) throw new Error('Failed to fetch runs');
       const runsData = await runsRes.json();
       setRuns(runsData.runs || []);
+
+      const sessionsData = await getSessions();
+      setSessions(sessionsData);
+
+      const billingStatus = await getBillingStatus();
+      setBilling(billingStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [authReady, router]);
 
   // Setup SSE connection
   useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
     fetchInitialData();
 
     const setupSSE = () => {
-      const es = new EventSource(`${API_BASE}/events`);
+      let opened = false;
+      const es = new EventSource(`${API_BASE}/events`, { withCredentials: true });
 
       es.onopen = () => {
+        opened = true;
         console.log('[SSE] Connected');
         setSseConnected(true);
       };
@@ -205,6 +340,32 @@ export default function Dashboard() {
                 });
               }
               break;
+
+            case 'tool_update':
+              if (data.tool) {
+                const tool = data.tool;
+                if (tool.runId) {
+                  setRunTools((prev) => {
+                    const existing = prev[tool.runId!]?.find((t) => t.toolEventId === tool.toolEventId);
+                    let updated;
+                    if (existing) {
+                      updated = {
+                        ...prev,
+                        [tool.runId!]: prev[tool.runId!].map((t) =>
+                          t.toolEventId === tool.toolEventId ? tool : t
+                        ),
+                      };
+                    } else {
+                      updated = {
+                        ...prev,
+                        [tool.runId!]: [tool, ...(prev[tool.runId!] || [])].slice(0, 50),
+                      };
+                    }
+                    return updated;
+                  });
+                }
+              }
+              break;
           }
         } catch (err) {
           console.error('[SSE] Failed to parse message:', err);
@@ -214,6 +375,11 @@ export default function Dashboard() {
       es.onerror = (err) => {
         console.error('[SSE] Error:', err);
         setSseConnected(false);
+        if (!opened) {
+          setError('Please log in again');
+          es.close();
+          return;
+        }
         setTimeout(() => {
           if (es.readyState === EventSource.CLOSED) {
             setupSSE();
@@ -229,7 +395,7 @@ export default function Dashboard() {
     // Poll devices every 3 seconds
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/devices`);
+        const res = await apiFetch('/devices');
         if (res.ok) {
           const data = await res.json();
           setDevices(data.devices || []);
@@ -243,7 +409,7 @@ export default function Dashboard() {
       clearInterval(interval);
       es.close();
     };
-  }, [fetchInitialData]);
+  }, [authReady, fetchInitialData]);
 
   const handlePairSubmit = async (deviceId: string) => {
     const code = pairingInputs[deviceId]?.trim().toUpperCase();
@@ -252,9 +418,8 @@ export default function Dashboard() {
     setPairingLoading((prev) => ({ ...prev, [deviceId]: true }));
     
     try {
-      const res = await fetch(`${API_BASE}/devices/${deviceId}/pair`, {
+      const res = await apiFetch(`/devices/${deviceId}/pair`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pairingCode: code }),
       });
 
@@ -265,7 +430,7 @@ export default function Dashboard() {
 
       setPairingInputs((prev) => ({ ...prev, [deviceId]: '' }));
       
-      const devicesRes = await fetch(`${API_BASE}/devices`);
+      const devicesRes = await apiFetch('/devices');
       if (devicesRes.ok) {
         const data = await devicesRes.json();
         setDevices(data.devices || []);
@@ -278,13 +443,20 @@ export default function Dashboard() {
   };
 
   const handleCreateRun = async () => {
+    if (billing?.subscriptionStatus !== 'active') {
+      alert('An active subscription is required to create runs.');
+      return;
+    }
     if (!selectedDeviceId || !newRunGoal.trim()) return;
 
     try {
-      const res = await fetch(`${API_BASE}/runs`, {
+      const res = await apiFetch('/runs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: selectedDeviceId, goal: newRunGoal }),
+        body: JSON.stringify({ 
+          deviceId: selectedDeviceId, 
+          goal: newRunGoal,
+          mode: selectedRunMode,
+        }),
       });
 
       if (!res.ok) {
@@ -294,7 +466,7 @@ export default function Dashboard() {
 
       setNewRunGoal('');
       
-      const runsRes = await fetch(`${API_BASE}/runs`);
+      const runsRes = await apiFetch('/runs');
       if (runsRes.ok) {
         const data = await runsRes.json();
         setRuns(data.runs || []);
@@ -306,9 +478,8 @@ export default function Dashboard() {
 
   const handleCancelRun = async (runId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/runs/${runId}/cancel`, {
+      const res = await apiFetch(`/runs/${runId}/cancel`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Canceled from dashboard' }),
       });
 
@@ -321,14 +492,46 @@ export default function Dashboard() {
     }
   };
 
+  const handleSelectRunTools = async (runId: string) => {
+    setSelectedRunId(runId);
+
+    try {
+      const res = await apiFetch(`/runs/${runId}/tools`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to fetch tool timeline');
+      }
+
+      const data = await res.json();
+      setRunTools((prev) => ({
+        ...prev,
+        [runId]: data.tools || [],
+      }));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to fetch tool timeline');
+    }
+  };
+
+  const handleLogoutAll = async () => {
+    try {
+      await logoutAllSessions();
+      router.push('/login');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to log out all sessions');
+    }
+  };
+
   // Send control action
   const sendAction = async (action: DeviceAction['action']) => {
+    if (billing?.subscriptionStatus !== 'active') {
+      alert('An active subscription is required for remote control.');
+      return;
+    }
     if (!previewDeviceId) return;
     
     try {
-      const res = await fetch(`${API_BASE}/devices/${previewDeviceId}/actions`, {
+      const res = await apiFetch(`/devices/${previewDeviceId}/actions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       });
 
@@ -378,9 +581,29 @@ export default function Dashboard() {
 
   const pairedDevices = devices.filter((d) => d.paired);
   const previewDevice = previewDeviceId ? devices.find((d) => d.deviceId === previewDeviceId) : null;
+  const hasActiveSubscription = billing?.subscriptionStatus === 'active';
 
   const getCompletedStepsCount = (run: Run): number => {
     return run.steps.filter((s) => s.status === 'done').length;
+  };
+
+  // Helper to summarize action for display
+  const summarizeAction = (action: DeviceAction['action']): string => {
+    switch (action.kind) {
+      case 'type':
+        const text = action.text as string;
+        return `Type (${text.length} chars)`;
+      case 'click':
+        return `Click at (${((action.x as number) * 100).toFixed(0)}%, ${((action.y as number) * 100).toFixed(0)}%)`;
+      case 'double_click':
+        return `Double-click`;
+      case 'scroll':
+        return `Scroll`;
+      case 'hotkey':
+        return `Hotkey ${action.key}`;
+      default:
+        return action.kind;
+    }
   };
 
   if (loading) {
@@ -400,7 +623,34 @@ export default function Dashboard() {
         ← Back to Home
       </Link>
 
-      <h1 style={{ marginTop: '1rem' }}>Dashboard</h1>
+      <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h1 style={{ margin: 0 }}>Dashboard</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          {userEmail && <span style={{ fontSize: '0.875rem', color: '#374151' }}>{userEmail}</span>}
+          <button
+            onClick={() => {
+              void (async () => {
+                try {
+                  await logout();
+                } catch (err) {
+                  console.error('[Auth] Logout failed:', err);
+                } finally {
+                  router.push('/login');
+                }
+              })();
+            }}
+            style={{
+              padding: '0.4rem 0.75rem',
+              background: '#f3f4f6',
+              border: '1px solid #d1d5db',
+              borderRadius: '6px',
+              cursor: 'pointer',
+            }}
+          >
+            Logout
+          </button>
+        </div>
+      </div>
 
       {/* Connection Status */}
       <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
@@ -424,6 +674,85 @@ export default function Dashboard() {
           Error: {error}
         </div>
       )}
+
+      {!hasActiveSubscription && (
+        <div
+          style={{
+            marginTop: '1rem',
+            padding: '1rem',
+            background: '#fff7ed',
+            border: '1px solid #fdba74',
+            borderRadius: '8px',
+            color: '#9a3412',
+          }}
+        >
+          Subscription required to start runs and use remote control. <Link href="/billing">Go to Billing</Link>.
+        </div>
+      )}
+
+      <section
+        style={{
+          marginTop: '1rem',
+          padding: '1rem',
+          background: 'white',
+          borderRadius: '8px',
+          border: '1px solid #e5e7eb',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Sessions</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+              Active and recent browser sessions for this account
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              void handleLogoutAll();
+            }}
+            style={{
+              padding: '0.45rem 0.8rem',
+              background: '#fff7ed',
+              border: '1px solid #fdba74',
+              borderRadius: '6px',
+              cursor: 'pointer',
+            }}
+          >
+            Logout All Sessions
+          </button>
+        </div>
+
+        {sessions.length === 0 ? (
+          <p style={{ marginTop: '0.75rem', color: '#6b7280', fontSize: '0.875rem' }}>No active sessions found.</p>
+        ) : (
+          <div style={{ display: 'grid', gap: '0.75rem', marginTop: '0.75rem' }}>
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                style={{
+                  padding: '0.75rem',
+                  borderRadius: '6px',
+                  border: '1px solid #e5e7eb',
+                  background: '#f9fafb',
+                }}
+              >
+                <div style={{ fontSize: '0.875rem', color: '#111827' }}>
+                  Created: {formatTime(new Date(session.createdAt).getTime())} • Last used: {formatTime(new Date(session.lastUsedAt).getTime())}
+                </div>
+                <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>
+                  Expires: {formatTime(new Date(session.expiresAt).getTime())}
+                  {session.revokedAt ? ` • Revoked: ${formatTime(new Date(session.revokedAt).getTime())}` : ''}
+                </div>
+                {session.userAgent && (
+                  <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>
+                    {session.userAgent}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div style={{ display: 'grid', gridTemplateColumns: previewDeviceId ? '1fr 400px' : '1fr', gap: '2rem' }}>
         <div>
@@ -459,6 +788,16 @@ export default function Dashboard() {
                         {device.screenStreamState?.enabled && (
                           <p style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#10b981' }}>
                             📹 Screen sharing active ({device.screenStreamState.fps} FPS)
+                          </p>
+                        )}
+                        {/* Iteration 8: Workspace badge */}
+                        {device.workspaceState?.configured ? (
+                          <p style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#3b82f6' }}>
+                            📁 Workspace: {device.workspaceState.rootName}
+                          </p>
+                        ) : (
+                          <p style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#9ca3af' }}>
+                            📁 Workspace: Not configured
                           </p>
                         )}
                       </div>
@@ -557,7 +896,7 @@ export default function Dashboard() {
           {pairedDevices.length > 0 && (
             <section style={{ marginTop: '2rem', padding: '1rem', background: '#f9fafb', borderRadius: '8px' }}>
               <h2 style={{ marginTop: 0 }}>Create Run</h2>
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
                     Device
@@ -565,6 +904,7 @@ export default function Dashboard() {
                   <select
                     value={selectedDeviceId}
                     onChange={(e) => setSelectedDeviceId(e.target.value)}
+                    disabled={!hasActiveSubscription}
                     style={{
                       padding: '0.5rem',
                       borderRadius: '4px',
@@ -580,7 +920,26 @@ export default function Dashboard() {
                     ))}
                   </select>
                 </div>
-                <div style={{ flex: 1 }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
+                    Mode
+                  </label>
+                  <select
+                    value={selectedRunMode}
+                    onChange={(e) => setSelectedRunMode(e.target.value as 'manual' | 'ai_assist')}
+                    disabled={!hasActiveSubscription}
+                    style={{
+                      padding: '0.5rem',
+                      borderRadius: '4px',
+                      border: '1px solid #ddd',
+                      fontSize: '0.875rem',
+                    }}
+                  >
+                    <option value="manual">Manual</option>
+                    <option value="ai_assist">🤖 AI Assist</option>
+                  </select>
+                </div>
+                <div style={{ flex: 1, minWidth: '200px' }}>
                   <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
                     Goal
                   </label>
@@ -589,6 +948,7 @@ export default function Dashboard() {
                     placeholder="e.g., Open Chrome and search for..."
                     value={newRunGoal}
                     onChange={(e) => setNewRunGoal(e.target.value)}
+                    disabled={!hasActiveSubscription}
                     style={{
                       width: '100%',
                       padding: '0.5rem',
@@ -600,20 +960,26 @@ export default function Dashboard() {
                 </div>
                 <button
                   onClick={handleCreateRun}
-                  disabled={!selectedDeviceId || !newRunGoal.trim()}
+                  disabled={!hasActiveSubscription || !selectedDeviceId || !newRunGoal.trim()}
                   style={{
                     padding: '0.5rem 1rem',
-                    backgroundColor: selectedDeviceId && newRunGoal.trim() ? '#10b981' : '#ccc',
+                    backgroundColor: hasActiveSubscription && selectedDeviceId && newRunGoal.trim() ? '#10b981' : '#ccc',
                     color: 'white',
                     border: 'none',
                     borderRadius: '4px',
-                    cursor: selectedDeviceId && newRunGoal.trim() ? 'pointer' : 'not-allowed',
+                    cursor: hasActiveSubscription && selectedDeviceId && newRunGoal.trim() ? 'pointer' : 'not-allowed',
                     fontSize: '0.875rem',
                   }}
                 >
                   Create Run
                 </button>
               </div>
+              {selectedRunMode === 'ai_assist' && (
+                <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem', color: '#8b5cf6' }}>
+                  🤖 AI Assist: The AI will analyze the screen and propose actions one at a time.
+                  Every action requires explicit user approval on the desktop.
+                </p>
+              )}
             </section>
           )}
 
@@ -637,11 +1003,33 @@ export default function Dashboard() {
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                       <div>
-                        <p style={{ margin: 0, fontWeight: 500 }}>{run.goal}</p>
+                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.25rem' }}>
+                          <p style={{ margin: 0, fontWeight: 500 }}>{run.goal}</p>
+                          {run.mode === 'ai_assist' && (
+                            <span
+                              style={{
+                                padding: '0.125rem 0.5rem',
+                                backgroundColor: '#8b5cf620',
+                                color: '#8b5cf6',
+                                borderRadius: '9999px',
+                                fontSize: '0.625rem',
+                                fontWeight: 600,
+                              }}
+                            >
+                              AI ASSIST
+                            </span>
+                          )}
+                        </div>
                         <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
                           ID: {run.runId.slice(0, 8)}... • Device: {run.deviceId.slice(0, 8)}... • 
                           Created: {formatTime(run.createdAt)}
                         </p>
+                        {run.mode === 'ai_assist' && run.constraints && (
+                          <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
+                            Actions: {run.actionCount || 0} / {run.constraints.maxActions} • 
+                            Max runtime: {run.constraints.maxRuntimeMinutes} min
+                          </p>
+                        )}
                         {run.steps.length > 0 && (
                           <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
                             Progress: {getCompletedStepsCount(run)}/{run.steps.length} steps
@@ -681,8 +1069,161 @@ export default function Dashboard() {
                             Cancel
                           </button>
                         )}
+                        <button
+                          onClick={() => handleSelectRunTools(run.runId)}
+                          style={{
+                            padding: '0.25rem 0.5rem',
+                            backgroundColor: selectedRunId === run.runId ? '#dbeafe' : '#f3f4f6',
+                            color: selectedRunId === run.runId ? '#1d4ed8' : '#374151',
+                            border: 'none',
+                            borderRadius: '4px',
+                            fontSize: '0.75rem',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Tools
+                        </button>
                       </div>
                     </div>
+
+                    {/* AI Assist: Latest Proposal */}
+                    {run.mode === 'ai_assist' && run.latestProposal && (
+                      <div
+                        style={{
+                          marginTop: '0.75rem',
+                          padding: '0.75rem',
+                          background: '#fef3c7',
+                          borderRadius: '6px',
+                          fontSize: '0.875rem',
+                        }}
+                      >
+                        <strong style={{ color: '#92400e' }}>🤖 Latest AI Proposal:</strong>
+                        {run.latestProposal.kind === 'propose_action' && (
+                          <div style={{ marginTop: '0.25rem' }}>
+                            <div style={{ color: '#78350f' }}>
+                              Action: {summarizeAction(run.latestProposal.action)}
+                            </div>
+                            <div style={{ color: '#92400e', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                              {run.latestProposal.rationale}
+                            </div>
+                            {run.latestProposal.confidence !== undefined && (
+                              <div style={{ color: '#92400e', fontSize: '0.75rem' }}>
+                                Confidence: {Math.round(run.latestProposal.confidence * 100)}%
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        {run.latestProposal.kind === 'propose_tool' && (
+                          <div style={{ marginTop: '0.25rem' }}>
+                            <div style={{ color: '#78350f' }}>
+                              Tool: {run.latestProposal.toolCall.tool}
+                              {run.latestProposal.toolCall.tool.startsWith('fs.') && (
+                                <span> → {run.latestProposal.toolCall.path}</span>
+                              )}
+                              {run.latestProposal.toolCall.tool === 'terminal.exec' && (
+                                <span> → {run.latestProposal.toolCall.cmd}</span>
+                              )}
+                            </div>
+                            <div style={{ color: '#92400e', fontSize: '0.75rem', marginTop: '0.25rem' }}>
+                              {run.latestProposal.rationale}
+                            </div>
+                          </div>
+                        )}
+                        {run.latestProposal.kind === 'ask_user' && (
+                          <div style={{ marginTop: '0.25rem', color: '#78350f' }}>
+                            ❓ {run.latestProposal.question}
+                          </div>
+                        )}
+                        {run.latestProposal.kind === 'done' && (
+                          <div style={{ marginTop: '0.25rem', color: '#166534' }}>
+                            ✅ {run.latestProposal.summary}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Iteration 8: Tool Timeline */}
+                    {runTools[run.runId] && runTools[run.runId].length > 0 && (
+                      <div
+                        style={{
+                          marginTop: '0.75rem',
+                          padding: '0.75rem',
+                          background: '#f3f4f6',
+                          borderRadius: '6px',
+                          fontSize: '0.75rem',
+                        }}
+                      >
+                        <strong style={{ color: '#374151' }}>🛠️ Tool Timeline:</strong>
+                        <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.375rem' }}>
+                          {runTools[run.runId].slice(0, 10).map((tool) => (
+                            <div
+                              key={tool.toolEventId}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                padding: '0.25rem 0.5rem',
+                                background: 'white',
+                                borderRadius: '4px',
+                              }}
+                            >
+                              <span
+                                style={{
+                                  width: '8px',
+                                  height: '8px',
+                                  borderRadius: '50%',
+                                  backgroundColor:
+                                    tool.status === 'executed'
+                                      ? '#10b981'
+                                      : tool.status === 'failed'
+                                      ? '#ef4444'
+                                      : '#f59e0b',
+                                }}
+                              />
+                              <span style={{ flex: 1 }}>
+                                {tool.tool}
+                                {tool.pathRel && <span style={{ color: '#6b7280' }}> → {tool.pathRel}</span>}
+                                {tool.cmd && <span style={{ color: '#6b7280' }}> → {tool.cmd}</span>}
+                              </span>
+                              <span
+                                style={{
+                                  padding: '0.125rem 0.375rem',
+                                  backgroundColor: `${
+                                    tool.status === 'executed'
+                                      ? '#10b981'
+                                      : tool.status === 'failed'
+                                      ? '#ef4444'
+                                      : '#f59e0b'
+                                  }20`,
+                                  color:
+                                    tool.status === 'executed'
+                                      ? '#10b981'
+                                      : tool.status === 'failed'
+                                      ? '#ef4444'
+                                      : '#f59e0b',
+                                  borderRadius: '4px',
+                                  fontSize: '0.625rem',
+                                  textTransform: 'uppercase',
+                                }}
+                              >
+                                {tool.status}
+                              </span>
+                              {tool.exitCode !== undefined && (
+                                <span style={{ color: '#6b7280' }}>exit:{tool.exitCode}</span>
+                              )}
+                              {tool.errorCode && (
+                                <span style={{ color: '#ef4444' }}>err:{tool.errorCode}</span>
+                              )}
+                            </div>
+                          ))}
+                          {runTools[run.runId].length > 10 && (
+                            <div style={{ textAlign: 'center', color: '#9ca3af', fontSize: '0.625rem' }}>
+                              +{runTools[run.runId].length - 10} more tools
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     {run.steps.length > 0 && (
                       <div style={{ marginTop: '0.75rem' }}>
@@ -730,6 +1271,70 @@ export default function Dashboard() {
               </div>
             )}
           </section>
+
+          {selectedRunId && (
+            <section style={{ marginTop: '2rem' }}>
+              <h2>Tools</h2>
+              <div
+                style={{
+                  padding: '1rem',
+                  background: 'white',
+                  borderRadius: '8px',
+                  border: '1px solid #e0e0e0',
+                }}
+              >
+                <p style={{ margin: '0 0 0.75rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                  Run: {selectedRunId.slice(0, 8)}...
+                </p>
+                {runTools[selectedRunId]?.length ? (
+                  <div style={{ display: 'grid', gap: '0.5rem' }}>
+                    {runTools[selectedRunId].map((tool) => (
+                      <div
+                        key={tool.toolEventId}
+                        style={{
+                          padding: '0.75rem',
+                          borderRadius: '6px',
+                          background: '#f9fafb',
+                          border: '1px solid #e5e7eb',
+                          fontSize: '0.75rem',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem' }}>
+                          <span style={{ fontWeight: 600 }}>
+                            {tool.tool}
+                            {tool.pathRel && <span style={{ color: '#6b7280' }}> • {tool.pathRel}</span>}
+                            {tool.cmd && <span style={{ color: '#6b7280' }}> • {tool.cmd}</span>}
+                          </span>
+                          <StatusBadge
+                            label={tool.status}
+                            color={
+                              tool.status === 'executed'
+                                ? '#10b981'
+                                : tool.status === 'failed'
+                                ? '#ef4444'
+                                : tool.status === 'denied'
+                                ? '#6b7280'
+                                : '#f59e0b'
+                            }
+                          />
+                        </div>
+                        <div style={{ marginTop: '0.375rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', color: '#6b7280' }}>
+                          <span>{formatTime(tool.at)}</span>
+                          {tool.exitCode !== undefined && <span>exit:{tool.exitCode}</span>}
+                          {tool.truncated !== undefined && <span>truncated:{tool.truncated ? 'yes' : 'no'}</span>}
+                          {tool.errorCode && <span style={{ color: '#dc2626' }}>err:{tool.errorCode}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ margin: 0, color: '#6b7280', fontSize: '0.875rem' }}>
+                    No tool events yet for this run.
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
         </div>
 
         {/* Screen Preview Panel */}
@@ -766,14 +1371,14 @@ export default function Dashboard() {
                 <img
                   src={`${API_BASE}/devices/${previewDeviceId}/screen.png?ts=${screenTimestamp}`}
                   alt="Screen preview"
-                  onClick={handleImageClick}
-                  onWheel={handleWheel}
+                  onClick={hasActiveSubscription ? handleImageClick : undefined}
+                  onWheel={hasActiveSubscription ? handleWheel : undefined}
                   title="Click to send action, scroll to scroll"
                   style={{
                     width: '100%',
                     borderRadius: '4px',
                     border: '1px solid #e0e0e0',
-                    cursor: previewDevice?.controlState?.enabled ? 'crosshair' : 'not-allowed',
+                    cursor: previewDevice?.controlState?.enabled && hasActiveSubscription ? 'crosshair' : 'not-allowed',
                   }}
                 />
                 
@@ -783,6 +1388,11 @@ export default function Dashboard() {
                     <div style={{ fontSize: '0.875rem', fontWeight: 600, color: '#166534', marginBottom: '0.75rem' }}>
                       🎮 Remote Control Active
                     </div>
+                    {!hasActiveSubscription && (
+                      <div style={{ marginBottom: '0.75rem', fontSize: '0.8rem', color: '#9a3412' }}>
+                        Subscription required for remote control actions. <Link href="/billing">Upgrade in Billing</Link>.
+                      </div>
+                    )}
                     
                     {/* Type Input */}
                     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
@@ -791,12 +1401,13 @@ export default function Dashboard() {
                         value={typeText}
                         onChange={(e) => setTypeText(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
+                          if (e.key === 'Enter' && hasActiveSubscription) {
                             handleTypeSubmit();
                           }
                         }}
                         placeholder="Type text..."
                         maxLength={500}
+                        disabled={!hasActiveSubscription}
                         style={{
                           flex: 1,
                           padding: '0.5rem',
@@ -807,14 +1418,14 @@ export default function Dashboard() {
                       />
                       <button
                         onClick={handleTypeSubmit}
-                        disabled={!typeText.trim()}
+                        disabled={!hasActiveSubscription || !typeText.trim()}
                         style={{
                           padding: '0.5rem 1rem',
                           borderRadius: '4px',
                           border: 'none',
-                          background: typeText.trim() ? '#16a34a' : '#9ca3af',
+                          background: hasActiveSubscription && typeText.trim() ? '#16a34a' : '#9ca3af',
                           color: 'white',
-                          cursor: typeText.trim() ? 'pointer' : 'not-allowed',
+                          cursor: hasActiveSubscription && typeText.trim() ? 'pointer' : 'not-allowed',
                           fontSize: '0.875rem',
                         }}
                       >
@@ -824,13 +1435,13 @@ export default function Dashboard() {
 
                     {/* Hotkey Buttons */}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                      <button onClick={() => handleHotkey('return')} style={hotkeyBtnStyle}>Enter</button>
-                      <button onClick={() => handleHotkey('tab')} style={hotkeyBtnStyle}>Tab</button>
-                      <button onClick={() => handleHotkey('escape')} style={hotkeyBtnStyle}>Esc</button>
-                      <button onClick={() => handleHotkey('up')} style={hotkeyBtnStyle}>↑</button>
-                      <button onClick={() => handleHotkey('down')} style={hotkeyBtnStyle}>↓</button>
-                      <button onClick={() => handleHotkey('left')} style={hotkeyBtnStyle}>←</button>
-                      <button onClick={() => handleHotkey('right')} style={hotkeyBtnStyle}>→</button>
+                      <button onClick={() => handleHotkey('return')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>Enter</button>
+                      <button onClick={() => handleHotkey('tab')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>Tab</button>
+                      <button onClick={() => handleHotkey('escape')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>Esc</button>
+                      <button onClick={() => handleHotkey('up')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>↑</button>
+                      <button onClick={() => handleHotkey('down')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>↓</button>
+                      <button onClick={() => handleHotkey('left')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>←</button>
+                      <button onClick={() => handleHotkey('right')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>→</button>
                     </div>
 
                     {/* Actions Log */}
@@ -849,6 +1460,9 @@ export default function Dashboard() {
                               }}>
                                 {a.status}
                               </span>
+                              {a.source && (
+                                <span style={{ color: '#9ca3af' }}>({a.source})</span>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -885,7 +1499,7 @@ export default function Dashboard() {
               >
                 <p>Screen preview is not enabled.</p>
                 <p style={{ fontSize: '0.75rem', marginTop: '0.5rem' }}>
-                  Ask the user to enable "Share Screen Preview" in the desktop overlay.
+                  Ask the user to enable &quot;Share Screen Preview&quot; in the desktop overlay.
                 </p>
               </div>
             )}

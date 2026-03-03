@@ -18,6 +18,11 @@ export default function Home() {
               → Open Dashboard
             </Link>
           </li>
+          <li style={{ marginTop: '1rem' }}>
+            <Link href="/login" style={{ color: '#0070f3', textDecoration: 'none' }}>
+              → Login
+            </Link>
+          </li>
         </ul>
       </nav>
     </main>

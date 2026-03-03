@@ -27,5 +27,16 @@
     "active": true,
     "targets": "all",
     "icon": []
+  },
+  "plugins": {
+    "dialog": {},
+    "updater": {
+      "active": true,
+      "dialog": true,
+      "pubkey": "${VITE_DESKTOP_UPDATER_PUBLIC_KEY}",
+      "endpoints": [
+        "${VITE_API_HTTP_BASE}/updates/desktop/{{platform}}/{{arch}}/{{current_version}}.json"
+      ]
+    }
   }
 }

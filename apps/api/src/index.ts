@@ -1,35 +1,497 @@
-import Fastify, { type FastifyReply } from 'fastify';
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
+import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
+import fastifyRawBody from 'fastify-raw-body';
 import websocket from '@fastify/websocket';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { config } from './config.js';
-import { setupWebSocket, sendToDevice, getDeviceSocket } from './lib/ws-handler.js';
+import { setupWebSocket, sendToDevice, getDeviceSocket, getWsConnectionsCount } from './lib/ws-handler.js';
 import { deviceStore } from './store/devices.js';
 import { runStore } from './store/runs.js';
 import { screenStore } from './store/screen.js';
 import { actionStore } from './store/actions.js';
-import { setSSEBroadcast } from './engine/runEngine.js';
-import { createServerMessage, redactActionForLog } from '@ai-operator/shared';
-import type { InputAction } from '@ai-operator/shared';
+import { toolStore } from './store/tools.js';
+import { setRunPersistence, setSSEBroadcast } from './engine/runEngine.js';
+import { createServerMessage, redactActionForLog, DEFAULT_RUN_CONSTRAINTS } from '@ai-operator/shared';
+import type { InputAction, RunMode, ServerEventType } from '@ai-operator/shared';
+import { actionsRepo } from './repos/actions.js';
+import { auditRepo } from './repos/audit.js';
+import { devicesRepo } from './repos/devices.js';
+import { runsRepo } from './repos/runs.js';
+import { sessionsRepo } from './repos/sessions.js';
+import { toolsRepo } from './repos/tools.js';
+import { usersRepo } from './repos/users.js';
+import { ownership } from './lib/ownership.js';
+import { fetchDesktopRelease, getGitHubReleaseCacheStats } from './lib/releases/github.js';
+import { resolveDesktopAssets } from './lib/releases/resolveDesktopAssets.js';
+import { consumeRateLimit, getRateLimitKeyCount } from './lib/ratelimit.js';
+import { stripe, mapStripeSubscriptionStatus } from './lib/stripe.js';
+import { requireActiveSubscription } from './lib/subscription.js';
+import {
+  type AuthenticatedRequest,
+  clearAuthCookies,
+  getRefreshCookieToken,
+  getRequestAuthUser,
+  getRefreshTokenExpiryDate,
+  hashPassword,
+  hashRefreshToken,
+  isValidCsrf,
+  issueAccessToken,
+  issueCsrfToken,
+  issueRefreshToken,
+  requireAuth,
+  setSessionCookies,
+  shouldCheckCsrf,
+  verifyAccessToken,
+  verifyPassword,
+  type AuthUser,
+} from './lib/auth.js';
 
 const fastify = Fastify({
   logger: {
     level: config.LOG_LEVEL,
+    redact: {
+      paths: [
+        'req.headers.authorization',
+        'req.headers.cookie',
+        'req.headers["x-admin-api-key"]',
+        'res.headers["set-cookie"]',
+      ],
+      remove: true,
+    },
+  },
+  requestIdHeader: 'x-request-id',
+  genReqId(req) {
+    const header = req.headers['x-request-id'];
+    if (typeof header === 'string' && header.trim()) {
+      return header.trim();
+    }
+    if (Array.isArray(header) && typeof header[0] === 'string' && header[0].trim()) {
+      return header[0].trim();
+    }
+    return randomUUID();
   },
 });
 
 // Register WebSocket plugin
+await fastify.register(cookie);
+await fastify.register(cors, {
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (config.WEB_ORIGINS.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Origin not allowed'), false);
+  },
+  credentials: true,
+  allowedHeaders: ['Authorization', 'Content-Type', 'X-CSRF-Token'],
+});
+await fastify.register(fastifyRawBody, {
+  field: 'rawBody',
+  global: false,
+  encoding: false,
+  runFirst: true,
+});
 await fastify.register(websocket);
+
+fastify.addHook('onRequest', async (request, reply) => {
+  reply.header('x-request-id', request.id);
+  (request as FastifyRequest & { startedAt?: bigint }).startedAt = process.hrtime.bigint();
+});
+
+fastify.addHook('preHandler', async (request, reply) => {
+  if (!shouldCheckCsrf(request)) {
+    return;
+  }
+
+  if (isValidCsrf(request)) {
+    return;
+  }
+
+  reply.status(403);
+  return reply.send({
+    error: 'CSRF token required',
+    code: 'CSRF_REQUIRED',
+  });
+});
+
+fastify.addHook('onResponse', async (request, reply) => {
+  const startedAt = (request as FastifyRequest & { startedAt?: bigint }).startedAt;
+  const durationMs = startedAt
+    ? Number(process.hrtime.bigint() - startedAt) / 1_000_000
+    : undefined;
+  const authenticated = request as AuthenticatedRequest;
+  const userId = authenticated.user?.id ?? getRequestAuthUser(request)?.id ?? null;
+  const auditContext = getRequestAuditContext(request);
+
+  fastify.log.info(
+    {
+      requestId: request.id,
+      method: request.method,
+      path: request.url.split('?')[0],
+      status: reply.statusCode,
+      duration_ms: durationMs ? Math.round(durationMs * 100) / 100 : undefined,
+      userId,
+      ip: auditContext.ip,
+      userAgent: auditContext.userAgent,
+    },
+    'HTTP request completed'
+  );
+});
 
 // SSE clients
 interface SSEClient {
   id: string;
+  userId: string;
   reply: FastifyReply;
 }
 const sseClients = new Map<string, SSEClient>();
+
+interface RequestAuditContext {
+  ip: string | null;
+  userAgent: string | null;
+}
+
+function getHeaderValue(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : null;
+  }
+  return typeof value === 'string' ? value : null;
+}
+
+function getCoarseIp(ip: string | undefined): string | null {
+  if (!ip) {
+    return null;
+  }
+  if (ip.includes('.')) {
+    const parts = ip.split('.');
+    if (parts.length === 4) {
+      return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+    }
+  }
+  if (ip.includes(':')) {
+    return `${ip.split(':').slice(0, 4).join(':')}::`;
+  }
+  return ip;
+}
+
+function getRequestAuditContext(request: FastifyRequest): RequestAuditContext {
+  return {
+    ip: getCoarseIp(request.ip),
+    userAgent: getHeaderValue(request.headers['user-agent']),
+  };
+}
+
+function getActionAuditMeta(action: InputAction): Record<string, unknown> {
+  if (action.kind === 'type') {
+    return { kind: 'type', length: action.text.length };
+  }
+
+  if (action.kind === 'hotkey') {
+    return { kind: 'hotkey', key: action.key };
+  }
+
+  return { kind: action.kind };
+}
+
+function build429Reply(reply: FastifyReply, retryAfterSeconds: number) {
+  reply.header('Retry-After', String(retryAfterSeconds));
+  reply.status(429);
+  return {
+    error: 'Rate limit exceeded',
+    code: 'RATE_LIMITED',
+    retryAfterSeconds,
+  };
+}
+
+function enforceHttpRateLimit(reply: FastifyReply, key: string, limit: number, windowMs: number): boolean {
+  const result = consumeRateLimit(key, limit, windowMs);
+  if (result.allowed) {
+    return true;
+  }
+
+  void reply.send(build429Reply(reply, result.retryAfterSeconds));
+  return false;
+}
+
+async function createAuditEvent(
+  request: FastifyRequest | null,
+  event: {
+    userId?: string | null;
+    deviceId?: string | null;
+    runId?: string | null;
+    actionId?: string | null;
+    toolName?: string | null;
+    eventType: string;
+    meta?: Record<string, unknown> | null;
+  }
+) {
+  const context = request ? getRequestAuditContext(request) : { ip: null, userAgent: null };
+  try {
+    await auditRepo.createEvent({
+      ...event,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+  } catch (err) {
+    fastify.log.warn(
+      { eventType: event.eventType, err: err instanceof Error ? err.message : String(err) },
+      'Audit event write failed'
+    );
+  }
+}
+
+function authFromQueryToken(token?: string): AuthUser | null {
+  if (!token) return null;
+  return verifyAccessToken(token);
+}
+
+function buildSessionIdentity(request: { ip: string; headers: Record<string, unknown> }) {
+  const userAgentHeader = request.headers['user-agent'];
+  const userAgent = Array.isArray(userAgentHeader) ? userAgentHeader[0] : userAgentHeader;
+
+  return {
+    userAgent: typeof userAgent === 'string' ? userAgent : null,
+    ip: getCoarseIp(request.ip),
+  };
+}
+
+async function startSession(reply: FastifyReply, user: AuthUser, request: { ip: string; headers: Record<string, unknown> }) {
+  const accessToken = issueAccessToken(user);
+  const refreshToken = issueRefreshToken();
+  const csrfToken = issueCsrfToken();
+
+  await sessionsRepo.create({
+    userId: user.id,
+    refreshTokenHash: hashRefreshToken(refreshToken),
+    expiresAt: getRefreshTokenExpiryDate(),
+    ...buildSessionIdentity(request),
+  });
+
+  setSessionCookies(reply, accessToken, refreshToken, csrfToken);
+  return accessToken;
+}
+
+function getBillingSnapshot(user: {
+  subscriptionStatus?: string | null;
+  subscriptionCurrentPeriodEnd?: Date | null;
+  planPriceId?: string | null;
+}) {
+  return {
+    subscriptionStatus: user.subscriptionStatus === 'active' ? 'active' : 'inactive',
+    subscriptionCurrentPeriodEnd: user.subscriptionCurrentPeriodEnd?.toISOString() ?? null,
+    planPriceId: user.planPriceId ?? null,
+  };
+}
+
+function getSubscriptionFields(subscription: {
+  id?: string | null;
+  status?: string | null;
+  current_period_end?: number | null;
+  items?: { data?: Array<{ price?: { id?: string | null } | null }> } | null;
+}) {
+  const currentPeriodEnd = subscription.current_period_end
+    ? new Date(subscription.current_period_end * 1000)
+    : null;
+  const planPriceId = subscription.items?.data?.[0]?.price?.id ?? null;
+
+  return {
+    subscriptionId: subscription.id ?? null,
+    subscriptionStatus: mapStripeSubscriptionStatus(subscription.status),
+    subscriptionCurrentPeriodEnd: currentPeriodEnd,
+    planPriceId,
+  };
+}
+
+interface DesktopUpdateManifest {
+  version: string;
+  notes?: string;
+  pub_date?: string;
+  platforms?: Record<string, { url: string; signature: string }>;
+}
+
+function getDesktopUpdateManifestPath(platform: string, arch: string): string | null {
+  if (!/^[a-z0-9_-]+$/i.test(platform) || !/^[a-z0-9_-]+$/i.test(arch)) {
+    return null;
+  }
+
+  return resolve(process.cwd(), config.DESKTOP_UPDATE_FEED_DIR, `desktop-${platform}-${arch}.json`);
+}
+
+function normalizeDesktopUpdateManifest(manifest: DesktopUpdateManifest): DesktopUpdateManifest {
+  if (!manifest.platforms) {
+    return manifest;
+  }
+
+  const normalizedPlatforms = Object.fromEntries(
+    Object.entries(manifest.platforms).map(([target, value]) => [
+      target,
+      {
+        ...value,
+        url: value.url.startsWith('/')
+          ? `${config.API_PUBLIC_BASE_URL}${value.url}`
+          : value.url,
+      },
+    ])
+  );
+
+  return {
+    ...manifest,
+    platforms: normalizedPlatforms,
+  };
+}
+
+function getFileBasedDesktopDownloads() {
+  return {
+    version: config.DESKTOP_VERSION,
+    windowsUrl: config.DESKTOP_WIN_URL,
+    macIntelUrl: config.DESKTOP_MAC_INTEL_URL,
+    macArmUrl: config.DESKTOP_MAC_ARM_URL,
+    notes: 'Signed release artifacts and updater metadata are published through the desktop release pipeline.',
+    publishedAt: null,
+  };
+}
+
+async function getDesktopDownloadsPayload() {
+  if (config.DESKTOP_RELEASE_SOURCE === 'file') {
+    return getFileBasedDesktopDownloads();
+  }
+
+  const releaseResult = await fetchDesktopRelease();
+  const resolved = await resolveDesktopAssets(releaseResult.release);
+
+  fastify.log.info(
+    {
+      releaseTag: releaseResult.release.tagName,
+      assetCount: releaseResult.release.assets.length,
+      cache: releaseResult.cacheHit ? 'hit' : 'miss',
+    },
+    'Resolved desktop downloads from GitHub release'
+  );
+
+  return {
+    version: resolved.version,
+    windowsUrl: resolved.windows.url,
+    macIntelUrl: resolved.macIntel.url,
+    macArmUrl: resolved.macArm.url,
+    notes: resolved.notes,
+    publishedAt: resolved.publishedAt,
+  };
+}
+
+async function getDesktopUpdateManifest(platform: string, arch: string, currentVersion: string): Promise<DesktopUpdateManifest> {
+  if (config.DESKTOP_RELEASE_SOURCE === 'file') {
+    const manifestPath = getDesktopUpdateManifestPath(platform, arch);
+    if (!manifestPath) {
+      throw new Error('Invalid update target');
+    }
+
+    const manifestText = await readFile(manifestPath, 'utf8');
+    const manifest = normalizeDesktopUpdateManifest(JSON.parse(manifestText) as DesktopUpdateManifest);
+
+    fastify.log.debug(
+      { platform, arch, currentVersion, latestVersion: manifest.version },
+      'Desktop update manifest requested (file)'
+    );
+
+    return manifest;
+  }
+
+  const releaseResult = await fetchDesktopRelease();
+  const resolved = await resolveDesktopAssets(releaseResult.release);
+  const target = `${platform}-${arch}`;
+  const platformMap: Record<string, { url: string; signature: string } | undefined> = {
+    'windows-x86_64': resolved.windows,
+    'macos-x86_64': resolved.macIntel,
+    'macos-aarch64': resolved.macArm,
+    'darwin-x86_64': resolved.macIntel,
+    'darwin-aarch64': resolved.macArm,
+  };
+  const targetAsset = platformMap[target];
+
+  if (!targetAsset) {
+    throw new Error('Invalid update target');
+  }
+
+  fastify.log.info(
+    {
+      releaseTag: releaseResult.release.tagName,
+      assetCount: releaseResult.release.assets.length,
+      cache: releaseResult.cacheHit ? 'hit' : 'miss',
+      platform,
+      arch,
+      currentVersion,
+    },
+    'Desktop update manifest requested (github)'
+  );
+
+  return {
+    version: resolved.version,
+    notes: resolved.notes,
+    pub_date: resolved.publishedAt ?? new Date().toISOString(),
+    platforms: {
+      [target]: targetAsset,
+    },
+  };
+}
+
+function getOwnedDevices(userId: string) {
+  return deviceStore.getAll().filter((device) => ownership.getDeviceOwner(device.deviceId) === userId);
+}
+
+function eventBelongsToUser(event: ServerEventType, userId: string): boolean {
+  switch (event.type) {
+    case 'device_update':
+      return Boolean(event.device && typeof event.device === 'object' && 'deviceId' in event.device)
+        ? ownership.getDeviceOwner((event.device as { deviceId: string }).deviceId) === userId
+        : false;
+    case 'run_update':
+      return ownership.getRunOwner(event.run.runId) === userId;
+    case 'step_update':
+    case 'log_line':
+      return event.runId ? ownership.getRunOwner(event.runId) === userId : false;
+    case 'screen_update':
+      return ownership.getDeviceOwner(event.deviceId) === userId;
+    case 'action_update':
+      return ownership.getActionOwner(event.action.actionId) === userId;
+    case 'tool_update':
+      return ownership.getToolOwner(event.tool.toolEventId) === userId;
+    default:
+      return false;
+  }
+}
+
+async function persistRunIfOwned(runId: string): Promise<void> {
+  const run = runStore.get(runId);
+  const ownerUserId = ownership.getRunOwner(runId);
+  if (!run || !ownerUserId) return;
+  await runsRepo.save(run, ownerUserId);
+  if (run.status === 'done' || run.status === 'failed') {
+    await createAuditEvent(null, {
+      userId: ownerUserId,
+      deviceId: run.deviceId,
+      runId,
+      eventType: `run.${run.status}`,
+      meta: { mode: run.mode ?? 'manual' },
+    });
+  }
+}
 
 // Set up SSE broadcast from run engine
 setSSEBroadcast((event) => {
   const data = JSON.stringify(event);
   for (const [clientId, client] of sseClients) {
+    if (!eventBelongsToUser(event as ServerEventType, client.userId)) {
+      continue;
+    }
     try {
       client.reply.raw.write(`data: ${data}\n\n`);
     } catch (err) {
@@ -39,6 +501,45 @@ setSSEBroadcast((event) => {
   }
 });
 
+setRunPersistence((runId) => {
+  void persistRunIfOwned(runId);
+});
+
+const [persistedDevices, persistedRuns, persistedActions, persistedTools] = await Promise.all([
+  devicesRepo.loadAll(),
+  runsRepo.loadAll(),
+  actionsRepo.loadAll(),
+  toolsRepo.loadAll(),
+]);
+
+deviceStore.load(
+  persistedDevices.map(({ device }) => device)
+);
+for (const persisted of persistedDevices) {
+  ownership.setDeviceOwner(persisted.device.deviceId, persisted.ownerUserId);
+}
+
+runStore.load(
+  persistedRuns.map(({ run }) => run)
+);
+for (const persisted of persistedRuns) {
+  ownership.setRunOwner(persisted.run.runId, persisted.ownerUserId);
+}
+
+actionStore.load(
+  persistedActions.map(({ action }) => action)
+);
+for (const persisted of persistedActions) {
+  ownership.setActionOwner(persisted.action.actionId, persisted.ownerUserId);
+}
+
+toolStore.load(
+  persistedTools.map(({ tool }) => tool)
+);
+for (const persisted of persistedTools) {
+  ownership.setToolOwner(persisted.tool.toolEventId, persisted.ownerUserId);
+}
+
 // ============================================================================
 // Health Check
 // ============================================================================
@@ -47,25 +548,418 @@ fastify.get('/health', async () => {
   return {
     ok: true,
     timestamp: Date.now(),
-    version: '0.0.5',
+    version: '0.0.6',
   };
+});
+
+fastify.get('/admin/health', async (request, reply) => {
+  const adminKey = getHeaderValue(request.headers['x-admin-api-key']);
+  if (!config.ADMIN_API_KEY || adminKey !== config.ADMIN_API_KEY) {
+    reply.status(401);
+    return { error: 'Unauthorized' };
+  }
+
+  return {
+    ok: true,
+    wsConnectionsCount: getWsConnectionsCount(),
+    sseClientsCount: sseClients.size,
+    screenFramesInMemoryCount: screenStore.count(),
+    rateLimitKeysCount: getRateLimitKeyCount(),
+    githubReleaseCache: getGitHubReleaseCacheStats(),
+    uptimeSeconds: Math.floor(process.uptime()),
+  };
+});
+
+// ============================================================================
+// Auth Endpoints
+// ============================================================================
+
+fastify.post('/auth/register', async (request, reply) => {
+  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:auth:register`, config.AUTH_LOGIN_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const { email, password } = request.body as { email?: string; password?: string };
+  if (!email || !password || password.length < 8) {
+    reply.status(400);
+    return { error: 'email and password (min 8 chars) are required' };
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await usersRepo.findByEmail(normalizedEmail);
+  if (existing) {
+    reply.status(409);
+    return { error: 'User already exists' };
+  }
+
+  const passwordHash = await hashPassword(password);
+  const createdUser = await usersRepo.create(normalizedEmail, passwordHash);
+  await createAuditEvent(request, {
+    userId: createdUser.id,
+    eventType: 'auth.register',
+  });
+  return { ok: true };
+});
+
+fastify.post('/auth/login', async (request, reply) => {
+  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:auth:login`, config.AUTH_LOGIN_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const { email, password } = request.body as { email?: string; password?: string };
+  if (!email || !password) {
+    reply.status(400);
+    return { error: 'email and password are required' };
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = await usersRepo.findByEmail(normalizedEmail);
+  if (!user || !(await verifyPassword(password, user.passwordHash))) {
+    reply.status(401);
+    return { error: 'Invalid credentials' };
+  }
+
+  const authUser = { id: user.id, email: user.email };
+  const token = await startSession(reply, authUser, request);
+  await createAuditEvent(request, {
+    userId: authUser.id,
+    eventType: 'auth.login',
+  });
+  return {
+    token,
+    user: {
+      id: authUser.id,
+      email: authUser.email,
+    },
+  };
+});
+
+fastify.post('/auth/refresh', async (request, reply) => {
+  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:auth:refresh`, config.AUTH_REFRESH_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const refreshToken = getRefreshCookieToken(request);
+  if (!refreshToken) {
+    clearAuthCookies(reply);
+    reply.status(401);
+    return { error: 'Unauthorized' };
+  }
+
+  const session = await sessionsRepo.findByRefreshTokenHash(hashRefreshToken(refreshToken));
+  if (!session || session.revokedAt || session.expiresAt.getTime() <= Date.now()) {
+    clearAuthCookies(reply);
+    reply.status(401);
+    return { error: 'Unauthorized' };
+  }
+
+  const accessToken = issueAccessToken({
+    id: session.user.id,
+    email: session.user.email,
+  });
+  const nextRefreshToken = issueRefreshToken();
+  const csrfToken = issueCsrfToken();
+
+  await sessionsRepo.rotate(
+    session.id,
+    hashRefreshToken(nextRefreshToken),
+    getRefreshTokenExpiryDate()
+  );
+
+  setSessionCookies(reply, accessToken, nextRefreshToken, csrfToken);
+  await createAuditEvent(request, {
+    userId: session.user.id,
+    eventType: 'auth.refresh',
+  });
+  return { ok: true };
+});
+
+fastify.post('/auth/logout', async (request, reply) => {
+  const refreshToken = getRefreshCookieToken(request);
+  const session = refreshToken
+    ? await sessionsRepo.findByRefreshTokenHash(hashRefreshToken(refreshToken))
+    : null;
+  if (refreshToken) {
+    await sessionsRepo.revokeByRefreshTokenHash(hashRefreshToken(refreshToken));
+  }
+  clearAuthCookies(reply);
+  await createAuditEvent(request, {
+    userId: session?.user.id ?? null,
+    eventType: 'auth.logout',
+  });
+  return { ok: true };
+});
+
+fastify.post('/auth/logout_all', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  await sessionsRepo.revokeAllForUser(user.id);
+  clearAuthCookies(reply);
+  await createAuditEvent(request, {
+    userId: user.id,
+    eventType: 'auth.logout_all',
+  });
+  return { ok: true };
+});
+
+fastify.get('/auth/me', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  return {
+    user: {
+      id: user.id,
+      email: user.email,
+    },
+  };
+});
+
+fastify.get('/auth/sessions', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  const sessions = await sessionsRepo.listByUser(user.id);
+  return {
+    sessions: sessions.map((session) => ({
+      id: session.id,
+      createdAt: session.createdAt,
+      lastUsedAt: session.lastUsedAt,
+      expiresAt: session.expiresAt,
+      revokedAt: session.revokedAt,
+      userAgent: session.userAgent,
+    })),
+  };
+});
+
+// ============================================================================
+// Billing Endpoints
+// ============================================================================
+
+fastify.get('/updates/desktop/:platform/:arch/:currentVersion.json', async (request, reply) => {
+  if (!config.DESKTOP_UPDATE_ENABLED) {
+    reply.status(404);
+    return { error: 'Desktop updates are disabled' };
+  }
+
+  const { platform, arch, currentVersion } = request.params as {
+    platform: string;
+    arch: string;
+    currentVersion: string;
+  };
+
+  try {
+    const manifest = await getDesktopUpdateManifest(platform, arch, currentVersion);
+    return manifest;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    fastify.log.warn({ platform, arch, err: message }, 'Desktop update manifest unavailable');
+    reply.status(message === 'Invalid update target' ? 400 : 404);
+    return { error: message === 'Invalid update target' ? 'Invalid update target' : 'Update manifest not found' };
+  }
+});
+
+fastify.get('/billing/status', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  const billing = await usersRepo.getBilling(user.id);
+  if (!billing) {
+    reply.status(404);
+    return { error: 'User not found' };
+  }
+
+  return getBillingSnapshot(billing);
+});
+
+fastify.get('/downloads/desktop', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  if (!(await requireActiveSubscription(request, reply, user))) {
+    return;
+  }
+
+  try {
+    return await getDesktopDownloadsPayload();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    fastify.log.warn({ err: message }, 'Desktop downloads unavailable');
+    reply.status(503);
+    return { error: 'Downloads are not configured. Contact support.' };
+  }
+});
+
+fastify.post('/billing/checkout', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+  if (!enforceHttpRateLimit(reply, `user:${user.id}:billing`, config.BILLING_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const currentUser = await usersRepo.getBilling(user.id);
+  if (!currentUser) {
+    reply.status(404);
+    return { error: 'User not found' };
+  }
+
+  let stripeCustomerId = currentUser.stripeCustomerId;
+  if (!stripeCustomerId) {
+    const customer = await stripe.customers.create({
+      email: currentUser.email,
+      metadata: {
+        userId: currentUser.id,
+      },
+    });
+    stripeCustomerId = customer.id;
+    await usersRepo.updateStripeCustomerId(currentUser.id, stripeCustomerId);
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    customer: stripeCustomerId,
+    line_items: [
+      {
+        price: config.STRIPE_PRICE_ID,
+        quantity: 1,
+      },
+    ],
+    success_url: `${config.APP_BASE_URL}/dashboard?billing=success`,
+    cancel_url: `${config.APP_BASE_URL}/billing?billing=cancel`,
+    allow_promotion_codes: true,
+  });
+
+  await createAuditEvent(request, {
+    userId: user.id,
+    eventType: 'billing.checkout_requested',
+  });
+
+  return { url: session.url };
+});
+
+fastify.post('/billing/portal', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+  if (!enforceHttpRateLimit(reply, `user:${user.id}:billing`, config.BILLING_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const currentUser = await usersRepo.getBilling(user.id);
+  if (!currentUser?.stripeCustomerId) {
+    reply.status(400);
+    return { error: 'No Stripe customer found' };
+  }
+
+  const session = await stripe.billingPortal.sessions.create({
+    customer: currentUser.stripeCustomerId,
+    return_url: `${config.APP_BASE_URL}/billing`,
+  });
+
+  await createAuditEvent(request, {
+    userId: user.id,
+    eventType: 'billing.portal_requested',
+  });
+
+  return { url: session.url };
+});
+
+fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, reply) => {
+  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:billing:webhook`, config.BILLING_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const signature = request.headers['stripe-signature'];
+  const rawBody = (request as typeof request & { rawBody?: Buffer }).rawBody;
+
+  if (!signature || Array.isArray(signature) || !rawBody) {
+    reply.status(400);
+    return { error: 'Invalid webhook request' };
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(rawBody, signature, config.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    fastify.log.warn({ err }, 'Stripe webhook signature verification failed');
+    reply.status(400);
+    return { error: 'Invalid signature' };
+  }
+
+  fastify.log.info({ eventId: event.id, eventType: event.type }, 'Stripe webhook received');
+
+  switch (event.type) {
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object as any;
+      const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
+      if (customerId) {
+        await usersRepo.updateSubscriptionByStripeCustomerId(
+          customerId,
+          getSubscriptionFields(subscription)
+        );
+      }
+      break;
+    }
+
+    case 'checkout.session.completed': {
+      const session = event.data.object as any;
+      const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+      if (customerId && typeof session.subscription === 'string') {
+        await usersRepo.updateSubscriptionByStripeCustomerId(customerId, {
+          subscriptionStatus: 'active',
+          subscriptionId: session.subscription,
+        });
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  return { received: true };
 });
 
 // ============================================================================
 // Device REST Endpoints
 // ============================================================================
 
-fastify.get('/devices', async () => {
+fastify.get('/devices', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   return {
-    devices: deviceStore.getAll(),
+    devices: getOwnedDevices(user.id),
   };
 });
 
 fastify.get('/devices/:deviceId', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { deviceId } = request.params as { deviceId: string };
   const device = deviceStore.get(deviceId);
 
-  if (!device) {
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
     reply.status(404);
     return { error: 'Device not found' };
   }
@@ -74,12 +968,23 @@ fastify.get('/devices/:deviceId', async (request, reply) => {
 });
 
 fastify.post('/devices/:deviceId/pair', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { deviceId } = request.params as { deviceId: string };
   const { pairingCode } = request.body as { pairingCode: string };
 
   if (!pairingCode) {
     reply.status(400);
     return { error: 'pairingCode is required' };
+  }
+
+  const device = deviceStore.get(deviceId);
+  if (!device || !device.connected) {
+    reply.status(400);
+    return { error: 'Device must be connected before pairing' };
   }
 
   const result = deviceStore.confirmPairing(deviceId, pairingCode.toUpperCase().trim());
@@ -94,9 +999,29 @@ fastify.post('/devices/:deviceId/pair', async (request, reply) => {
     return { error: messages[result.reason] };
   }
 
-  // Notify device that pairing is complete
+  const deviceToken = randomBytes(36).toString('base64url');
+  await devicesRepo.claimDevice(deviceId, user.id, deviceToken);
+  ownership.setDeviceOwner(deviceId, user.id);
+  await createAuditEvent(request, {
+    userId: user.id,
+    deviceId,
+    eventType: 'device.claimed',
+  });
+  await createAuditEvent(request, {
+    userId: user.id,
+    deviceId,
+    eventType: 'device.token_issued',
+  });
+
+  // Notify device that pairing is complete and provide device token
   const socket = getDeviceSocket(deviceId);
   if (socket) {
+    const tokenMsg = createServerMessage('server.device.token', {
+      deviceId,
+      deviceToken,
+    });
+    socket.send(JSON.stringify(tokenMsg));
+
     const notification = createServerMessage('server.chat.message', {
       deviceId,
       message: {
@@ -108,7 +1033,7 @@ fastify.post('/devices/:deviceId/pair', async (request, reply) => {
     socket.send(JSON.stringify(notification));
   }
 
-  return { ok: true, device: result.device };
+  return { ok: true, device: deviceStore.get(deviceId) };
 });
 
 // ============================================================================
@@ -116,10 +1041,16 @@ fastify.post('/devices/:deviceId/pair', async (request, reply) => {
 // ============================================================================
 
 fastify.get('/devices/:deviceId/screen/meta', async (request, reply) => {
+  const queryUser = authFromQueryToken((request.query as { token?: string }).token);
+  const user = queryUser ?? await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { deviceId } = request.params as { deviceId: string };
   
   const device = deviceStore.get(deviceId);
-  if (!device) {
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
     reply.status(404);
     return { error: 'Device not found' };
   }
@@ -134,10 +1065,16 @@ fastify.get('/devices/:deviceId/screen/meta', async (request, reply) => {
 });
 
 fastify.get('/devices/:deviceId/screen.png', async (request, reply) => {
+  const queryUser = authFromQueryToken((request.query as { token?: string }).token);
+  const user = queryUser ?? await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { deviceId } = request.params as { deviceId: string };
   
   const device = deviceStore.get(deviceId);
-  if (!device) {
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
     reply.status(404);
     return { error: 'Device not found' };
   }
@@ -162,12 +1099,24 @@ fastify.get('/devices/:deviceId/screen.png', async (request, reply) => {
 
 // Create a new control action
 fastify.post('/devices/:deviceId/actions', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  if (!(await requireActiveSubscription(request, reply, user))) {
+    return;
+  }
+
   const { deviceId } = request.params as { deviceId: string };
   const { action } = request.body as { action: InputAction };
+  if (!enforceHttpRateLimit(reply, `device:${deviceId}:control:request`, config.CONTROL_ACTIONS_PER_10S, 10_000)) {
+    return;
+  }
 
   // Validate device exists
   const device = deviceStore.get(deviceId);
-  if (!device) {
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
     reply.status(404);
     return { error: 'Device not found' };
   }
@@ -191,27 +1140,23 @@ fastify.post('/devices/:deviceId/actions', async (request, reply) => {
     return { error: 'Remote control is not enabled on this device', code: 'CONTROL_NOT_ENABLED' };
   }
 
-  // Check rate limit
-  const rateLimit = actionStore.checkRateLimit(deviceId);
-  if (!rateLimit.allowed) {
-    reply.status(429);
-    return { 
-      error: 'Rate limit exceeded', 
-      code: 'CONTROL_RATE_LIMITED',
-      remaining: rateLimit.remaining,
-      resetIn: rateLimit.resetIn,
-    };
-  }
-
   // Create action
-  const deviceAction = actionStore.createAction(deviceId, action);
+  const deviceAction = actionStore.createAction(deviceId, action, 'web');
+  ownership.setActionOwner(deviceAction.actionId, user.id);
+  await actionsRepo.save(deviceAction, user.id);
+  await createAuditEvent(request, {
+    userId: user.id,
+    deviceId,
+    actionId: deviceAction.actionId,
+    eventType: 'control.requested',
+    meta: getActionAuditMeta(action),
+  });
   
   // Log action (with redaction for sensitive data)
   fastify.log.info({ 
     actionId: deviceAction.actionId, 
     deviceId, 
     action: redactActionForLog(action),
-    remaining: rateLimit.remaining,
   }, 'Control action created');
 
   // Send to device via WebSocket
@@ -225,29 +1170,54 @@ fastify.post('/devices/:deviceId/actions', async (request, reply) => {
   const sent = sendToDevice(deviceId, actionMsg);
   if (!sent) {
     // Device disconnected between check and send
-    actionStore.setResult(deviceAction.actionId, false, { code: 'DEVICE_DISCONNECTED', message: 'Device disconnected' });
+    const failedAction = actionStore.setResult(deviceAction.actionId, false, { code: 'DEVICE_DISCONNECTED', message: 'Device disconnected' });
+    if (failedAction) {
+      await actionsRepo.save(failedAction, user.id);
+    }
+    await createAuditEvent(request, {
+      userId: user.id,
+      deviceId,
+      actionId: deviceAction.actionId,
+      eventType: 'control.failed',
+      meta: getActionAuditMeta(action),
+    });
     reply.status(503);
     return { error: 'Device disconnected' };
   }
 
   // Update status to awaiting_user
-  actionStore.setStatus(deviceAction.actionId, 'awaiting_user');
+  const awaitingAction = actionStore.setStatus(deviceAction.actionId, 'awaiting_user');
+  if (awaitingAction) {
+    await actionsRepo.save(awaitingAction, user.id);
+  }
+  await createAuditEvent(request, {
+    userId: user.id,
+    deviceId,
+    actionId: deviceAction.actionId,
+    eventType: 'control.awaiting_user',
+    meta: getActionAuditMeta(action),
+  });
 
   return { ok: true, actionId: deviceAction.actionId };
 });
 
 // List actions for a device
 fastify.get('/devices/:deviceId/actions', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { deviceId } = request.params as { deviceId: string };
   const limit = Math.min(100, parseInt((request.query as { limit?: string }).limit || '50', 10));
 
   const device = deviceStore.get(deviceId);
-  if (!device) {
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
     reply.status(404);
     return { error: 'Device not found' };
   }
 
-  const actions = actionStore.getByDevice(deviceId, limit);
+  const actions = actionStore.getByDevice(deviceId, limit).filter((entry) => ownership.getActionOwner(entry.actionId) === user.id);
   return { actions };
 });
 
@@ -256,7 +1226,19 @@ fastify.get('/devices/:deviceId/actions', async (request, reply) => {
 // ============================================================================
 
 fastify.post('/runs', async (request, reply) => {
-  const { deviceId, goal } = request.body as { deviceId: string; goal: string };
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+  if (!enforceHttpRateLimit(reply, `user:${user.id}:runs:create`, config.RUNS_CREATE_PER_MIN, 60_000)) {
+    return;
+  }
+
+  if (!(await requireActiveSubscription(request, reply, user))) {
+    return;
+  }
+
+  const { deviceId, goal, mode } = request.body as { deviceId: string; goal: string; mode?: RunMode };
 
   if (!deviceId || !goal) {
     reply.status(400);
@@ -264,7 +1246,7 @@ fastify.post('/runs', async (request, reply) => {
   }
 
   const device = deviceStore.get(deviceId);
-  if (!device) {
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
     reply.status(404);
     return { error: 'Device not found' };
   }
@@ -274,9 +1256,23 @@ fastify.post('/runs', async (request, reply) => {
     return { error: 'Device must be paired before starting a run' };
   }
 
-  // Create run
-  const run = runStore.create({ deviceId, goal });
-  fastify.log.info({ runId: run.runId, deviceId, goal }, 'Run created');
+  // Validate mode
+  const runMode: RunMode = mode === 'ai_assist' ? 'ai_assist' : 'manual';
+  
+  // Create run with constraints for AI Assist mode
+  const constraints = runMode === 'ai_assist' ? DEFAULT_RUN_CONSTRAINTS : undefined;
+  const run = runStore.create({ deviceId, goal, mode: runMode, constraints });
+  ownership.setRunOwner(run.runId, user.id);
+  await runsRepo.save(run, user.id);
+  await createAuditEvent(request, {
+    userId: user.id,
+    deviceId,
+    runId: run.runId,
+    eventType: 'run.created',
+    meta: { mode: runMode },
+  });
+  
+  fastify.log.info({ runId: run.runId, deviceId, mode: runMode }, 'Run created');
 
   // Send run.start to device if connected
   if (device.connected) {
@@ -284,11 +1280,13 @@ fastify.post('/runs', async (request, reply) => {
       deviceId,
       runId: run.runId,
       goal,
+      mode: runMode,
+      constraints,
     });
     const sent = sendToDevice(deviceId, startMsg);
 
     if (sent) {
-      fastify.log.info({ runId: run.runId }, 'Run start sent to device');
+      fastify.log.info({ runId: run.runId, mode: runMode }, 'Run start sent to device');
     } else {
       fastify.log.warn({ runId: run.runId, deviceId }, 'Failed to send run.start to device');
     }
@@ -298,10 +1296,15 @@ fastify.post('/runs', async (request, reply) => {
 });
 
 fastify.get('/runs/:runId', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { runId } = request.params as { runId: string };
   const run = runStore.get(runId);
 
-  if (!run) {
+  if (!run || ownership.getRunOwner(runId) !== user.id) {
     reply.status(404);
     return { error: 'Run not found' };
   }
@@ -309,24 +1312,44 @@ fastify.get('/runs/:runId', async (request, reply) => {
   return { run };
 });
 
-fastify.get('/runs', async () => {
+fastify.get('/runs', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   return {
-    runs: runStore.getAll(),
+    runs: runStore.getAll().filter((run) => ownership.getRunOwner(run.runId) === user.id),
   };
 });
 
-fastify.get('/devices/:deviceId/runs', async (request) => {
+fastify.get('/devices/:deviceId/runs', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { deviceId } = request.params as { deviceId: string };
-  const runs = runStore.getByDevice(deviceId);
+  if (ownership.getDeviceOwner(deviceId) !== user.id) {
+    reply.status(404);
+    return { error: 'Device not found' };
+  }
+
+  const runs = runStore.getByDevice(deviceId).filter((run) => ownership.getRunOwner(run.runId) === user.id);
   return { runs };
 });
 
 fastify.post('/runs/:runId/cancel', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
   const { runId } = request.params as { runId: string };
   const { reason } = request.body as { reason?: string } || {};
 
   const run = runStore.get(runId);
-  if (!run) {
+  if (!run || ownership.getRunOwner(runId) !== user.id) {
     reply.status(404);
     return { error: 'Run not found' };
   }
@@ -347,8 +1370,59 @@ fastify.post('/runs/:runId/cancel', async (request, reply) => {
     socket.send(JSON.stringify(msg));
   }
 
-  fastify.log.info({ runId, reason }, 'Run canceled');
+  await runsRepo.save(canceled, user.id);
+  await createAuditEvent(request, {
+    userId: user.id,
+    deviceId: canceled.deviceId,
+    runId,
+    eventType: 'run.canceled',
+  });
+  fastify.log.info({ runId }, 'Run canceled');
   return { run: canceled };
+});
+
+// ============================================================================
+// Tool Timeline Endpoints (Iteration 8)
+// ============================================================================
+
+// Get tool timeline for a run
+fastify.get('/runs/:runId/tools', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  const { runId } = request.params as { runId: string };
+  const limit = Math.min(100, parseInt((request.query as { limit?: string }).limit || '50', 10));
+
+  const run = runStore.get(runId);
+  if (!run || ownership.getRunOwner(runId) !== user.id) {
+    reply.status(404);
+    return { error: 'Run not found' };
+  }
+
+  const tools = toolStore.getByRun(runId, limit).filter((tool) => ownership.getToolOwner(tool.toolEventId) === user.id);
+  return { tools };
+});
+
+// Get tool timeline for a device
+fastify.get('/devices/:deviceId/tools', async (request, reply) => {
+  const user = await requireAuth(request, reply);
+  if (!user) {
+    return { error: 'Unauthorized' };
+  }
+
+  const { deviceId } = request.params as { deviceId: string };
+  const limit = Math.min(100, parseInt((request.query as { limit?: string }).limit || '50', 10));
+
+  const device = deviceStore.get(deviceId);
+  if (!device || ownership.getDeviceOwner(deviceId) !== user.id) {
+    reply.status(404);
+    return { error: 'Device not found' };
+  }
+
+  const tools = toolStore.getByDevice(deviceId, limit).filter((tool) => ownership.getToolOwner(tool.toolEventId) === user.id);
+  return { tools };
 });
 
 // ============================================================================
@@ -356,16 +1430,28 @@ fastify.post('/runs/:runId/cancel', async (request, reply) => {
 // ============================================================================
 
 fastify.get('/events', async (request, reply) => {
+  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:sse`, config.SSE_CONNECT_PER_MIN, 60_000)) {
+    return;
+  }
+
+  const cookieOrBearerUser = getRequestAuthUser(request);
+  const queryUser = authFromQueryToken((request.query as { token?: string }).token);
+  const user = cookieOrBearerUser ?? queryUser;
+  if (!user) {
+    reply.status(401);
+    return { error: 'Unauthorized' };
+  }
+
   reply.raw.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
   });
 
-  const clientId = crypto.randomUUID();
-  sseClients.set(clientId, { id: clientId, reply });
+  const clientId = randomUUID();
+  sseClients.set(clientId, { id: clientId, userId: user.id, reply });
 
-  fastify.log.info({ clientId }, 'SSE client connected');
+  fastify.log.info({ clientId, count: sseClients.size, requestId: request.id }, 'SSE client connected');
 
   // Send initial connection message
   reply.raw.write(`data: ${JSON.stringify({ type: 'connected', clientId })}\n\n`);
@@ -373,7 +1459,7 @@ fastify.get('/events', async (request, reply) => {
   // Handle client disconnect
   request.raw.on('close', () => {
     sseClients.delete(clientId);
-    fastify.log.info({ clientId }, 'SSE client disconnected');
+    fastify.log.info({ clientId, count: sseClients.size, requestId: request.id }, 'SSE client disconnected');
   });
 
   // Keep connection alive

@@ -64,6 +64,11 @@ export const screenStore = {
     lastFrameTime.delete(deviceId);
   },
 
+  count(): number {
+    this.cleanup();
+    return frames.size;
+  },
+
   // Cleanup expired frames
   cleanup(): number {
     const now = Date.now();
@@ -91,7 +96,5 @@ export const screenStore = {
 // Periodic cleanup
 setInterval(() => {
   const cleaned = screenStore.cleanup();
-  if (cleaned > 0) {
-    console.log(`[ScreenStore] Cleaned up ${cleaned} expired frames`);
-  }
+  void cleaned;
 }, CLEANUP_INTERVAL_MS);

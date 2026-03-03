@@ -1,4 +1,4 @@
-import type { RunWithSteps, RunStep, StepStatus, ApprovalDecision, LogLine } from '@ai-operator/shared';
+import type { RunWithSteps, RunStep, StepStatus, ApprovalDecision, LogLine, ToolSummary } from '@ai-operator/shared';
 import { RunStatus, createServerMessage } from '@ai-operator/shared';
 import { runStore, type RunEngine } from '../store/runs.js';
 import { sendToDevice } from '../lib/ws-handler.js';
@@ -18,6 +18,7 @@ export function createRunEngine(runId: string, fastify: FastifyInstance): RunEng
 
     const log: LogLine = { line, level, at: Date.now() };
     runStore.addLog(runId, stepId, log);
+    persistRun(runId);
 
     // Send to device
     const msg = createServerMessage('server.run.log', {
@@ -55,6 +56,7 @@ export function createRunEngine(runId: string, fastify: FastifyInstance): RunEng
     }
 
     runStore.updateStep(runId, stepId, stepUpdate);
+    persistRun(runId);
 
     // Send to device
     const msg = createServerMessage('server.run.step_update', {
@@ -71,6 +73,7 @@ export function createRunEngine(runId: string, fastify: FastifyInstance): RunEng
   const updateRunStatus = (status: RunStatus, reason?: string) => {
     const run = runStore.updateStatus(runId, status, reason);
     if (run) {
+      persistRun(runId);
       // Send to device
       const msg = createServerMessage('server.run.status', {
         deviceId: run.deviceId,
@@ -140,6 +143,7 @@ export function createRunEngine(runId: string, fastify: FastifyInstance): RunEng
             expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
             status: 'pending',
           });
+          persistRun(runId);
 
           updateRunStatus('waiting_for_user');
           updateStep(step.stepId, 'blocked');
@@ -254,6 +258,7 @@ export function createRunEngine(runId: string, fastify: FastifyInstance): RunEng
       const run = runStore.get(runId);
       if (run?.pendingApproval) {
         runStore.resolveApproval(runId, decision, comment);
+        persistRun(runId);
         if (approvalResolve) {
           approvalResolve(decision);
           approvalResolve = null;
@@ -274,17 +279,29 @@ type SSEEvent =
   | { type: 'step_update'; runId: string; step: RunStep }
   | { type: 'log_line'; runId: string; stepId?: string; log: LogLine }
   | { type: 'screen_update'; deviceId: string; meta: { frameId: string; width: number; height: number; mime: string; at: number; byteLength: number } }
-  | { type: 'action_update'; action: unknown };
+  | { type: 'action_update'; action: unknown }
+  | { type: 'tool_update'; tool: ToolSummary };
 
 let sseBroadcastFn: ((event: SSEEvent) => void) | null = null;
+let persistRunFn: ((runId: string) => void) | null = null;
 
 export function setSSEBroadcast(fn: (event: SSEEvent) => void): void {
   sseBroadcastFn = fn;
 }
 
+export function setRunPersistence(fn: (runId: string) => void): void {
+  persistRunFn = fn;
+}
+
 function sseBroadcast(event: SSEEvent): void {
   if (sseBroadcastFn) {
     sseBroadcastFn(event);
+  }
+}
+
+function persistRun(runId: string): void {
+  if (persistRunFn) {
+    persistRunFn(runId);
   }
 }
 

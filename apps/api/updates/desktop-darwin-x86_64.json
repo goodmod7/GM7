@@ -1,0 +1,11 @@
+{
+  "version": "0.1.0",
+  "notes": "Development feed stub for Intel macOS builds.",
+  "pub_date": "2026-03-03T00:00:00.000Z",
+  "platforms": {
+    "darwin-x86_64": {
+      "url": "/downloads/desktop/artifacts/ai-operator-0.1.0-x64.dmg",
+      "signature": "replace-with-tauri-signature"
+    }
+  }
+}

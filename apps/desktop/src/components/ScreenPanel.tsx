@@ -6,11 +6,15 @@ import type { WsClient } from '../lib/wsClient.js';
 interface ScreenPanelProps {
   wsClient: WsClient;
   deviceId: string;
+  enabled: boolean;
+  onToggle: (enabled: boolean) => void;
+  onDisplayChange?: (displayId: string) => void;
 }
 
-export function ScreenPanel({ wsClient, deviceId }: ScreenPanelProps) {
+export function ScreenPanel({ wsClient, deviceId, enabled, onToggle, onDisplayChange }: ScreenPanelProps) {
   const [streamer, setStreamer] = useState<ScreenStreamer | null>(null);
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
+  const [hasLoadedDisplays, setHasLoadedDisplays] = useState(false);
   const [selectedDisplay, setSelectedDisplay] = useState<string>('');
   const [fps, setFps] = useState<1 | 2>(1);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -32,6 +36,9 @@ export function ScreenPanel({ wsClient, deviceId }: ScreenPanelProps) {
       onError: (err: CaptureError) => {
         setError(err.message);
         setNeedsPermission(err.needsPermission);
+        if (err.needsPermission) {
+          onToggle(false);
+        }
       },
     });
     setStreamer(s);
@@ -39,35 +46,74 @@ export function ScreenPanel({ wsClient, deviceId }: ScreenPanelProps) {
     // Load displays
     s.listDisplays().then((d) => {
       setDisplays(d);
+      setHasLoadedDisplays(true);
       if (d.length > 0) {
         setSelectedDisplay(d[0].displayId);
+        onDisplayChange?.(d[0].displayId);
       }
     });
 
     return () => {
       s.stop();
     };
-  }, [wsClient, deviceId]);
+  }, [wsClient, deviceId, onDisplayChange, onToggle]);
 
-  const handleToggle = useCallback(async () => {
-    if (!streamer) return;
+  useEffect(() => {
+    let cancelled = false;
 
-    setError(null);
-    setNeedsPermission(false);
-
-    if (isStreaming) {
-      streamer.stop();
-    } else {
-      if (!selectedDisplay) {
-        setError('Please select a display');
+    void (async () => {
+      if (!streamer) {
         return;
       }
-      const started = await streamer.start({ displayId: selectedDisplay, fps });
-      if (!started) {
-        setError('Failed to start streaming. Check WebSocket connection.');
+
+      const current = streamer.getState();
+      if (!enabled) {
+        if (current.isStreaming) {
+          streamer.stop();
+        }
+        return;
       }
-    }
-  }, [streamer, isStreaming, selectedDisplay, fps]);
+
+      if (!selectedDisplay) {
+        if (hasLoadedDisplays) {
+          setError('Please select a display');
+          onToggle(false);
+        }
+        return;
+      }
+
+      setError(null);
+      setNeedsPermission(false);
+
+      const needsRestart =
+        !current.isStreaming ||
+        current.displayId !== selectedDisplay ||
+        current.fps !== fps;
+
+      if (!needsRestart) {
+        return;
+      }
+
+      if (current.isStreaming) {
+        streamer.stop();
+      }
+
+      const started = await streamer.start({ displayId: selectedDisplay, fps });
+      if (!started && !cancelled) {
+        setError('Failed to start streaming. Check WebSocket connection.');
+        onToggle(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [streamer, enabled, selectedDisplay, fps, hasLoadedDisplays, onToggle]);
+
+  const handleDisplayChange = useCallback((displayId: string) => {
+    setSelectedDisplay(displayId);
+    onDisplayChange?.(displayId);
+  }, [onDisplayChange]);
 
   return (
     <div
@@ -122,7 +168,7 @@ export function ScreenPanel({ wsClient, deviceId }: ScreenPanelProps) {
           </label>
           <select
             value={selectedDisplay}
-            onChange={(e) => setSelectedDisplay(e.target.value)}
+            onChange={(e) => handleDisplayChange(e.target.value)}
             disabled={isStreaming}
             style={{
               padding: '0.5rem',
@@ -164,7 +210,7 @@ export function ScreenPanel({ wsClient, deviceId }: ScreenPanelProps) {
 
         {/* Toggle button */}
         <button
-          onClick={handleToggle}
+          onClick={() => onToggle(!enabled)}
           disabled={!selectedDisplay}
           style={{
             padding: '0.5rem 1rem',

@@ -1,0 +1,176 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  stripeCustomerId String? @unique
+  subscriptionStatus String @default("inactive")
+  subscriptionId String? @unique
+  subscriptionCurrentPeriodEnd DateTime?
+  planPriceId String?
+  createdAt    DateTime @default(now())
+
+  devices  Device[]
+  runs     Run[]
+  actions  Action[]
+  tools    ToolEvent[]
+  sessions Session[]
+  auditEvents AuditEvent[]
+}
+
+model Device {
+  id                 String    @id
+  ownerUserId        String?
+  deviceName         String?
+  platform           String
+  appVersion         String?
+  deviceToken        String?   @unique
+  pairingCode        String?
+  pairingExpiresAt   DateTime?
+  pairedAt           DateTime?
+  lastSeenAt         DateTime
+  controlEnabled     Boolean   @default(false)
+  screenStreamEnabled Boolean  @default(false)
+  screenDisplayId    String?
+  screenFps          Int?
+  workspaceRootName  String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  owner   User?      @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  runs    Run[]
+  actions Action[]
+  tools   ToolEvent[]
+
+  @@index([ownerUserId])
+}
+
+model Run {
+  id                 String    @id
+  ownerUserId        String
+  deviceId           String
+  goal               String
+  mode               String
+  status             String
+  reason             String?
+  constraintsJson    Json?
+  actionCount        Int       @default(0)
+  latestProposalJson Json?
+  createdAt          DateTime
+  updatedAt          DateTime
+
+  owner   User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  device  Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  steps   RunStep[]
+  actions Action[]
+  tools   ToolEvent[]
+
+  @@index([ownerUserId])
+  @@index([deviceId])
+}
+
+model RunStep {
+  id        String    @id @default(cuid())
+  runId      String
+  stepId     String
+  title      String
+  status     String
+  logsJson   Json
+  startedAt  DateTime?
+  endedAt    DateTime?
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, stepId])
+  @@index([runId])
+}
+
+model Action {
+  id                 String    @id
+  ownerUserId        String
+  deviceId           String
+  runId              String?
+  kind               String
+  status             String
+  source             String
+  errorCode          String?
+  redactedSummaryJson Json
+  createdAt          DateTime
+  updatedAt          DateTime
+
+  owner  User   @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  run    Run?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([ownerUserId])
+  @@index([deviceId])
+  @@index([runId])
+}
+
+model ToolEvent {
+  id          String   @id
+  ownerUserId String
+  deviceId    String
+  runId       String?
+  tool        String
+  status      String
+  summaryJson Json
+  createdAt   DateTime
+  updatedAt   DateTime
+
+  owner  User   @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  run    Run?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([ownerUserId])
+  @@index([deviceId])
+  @@index([runId])
+}
+
+model Session {
+  id               String   @id @default(cuid())
+  userId           String
+  refreshTokenHash String   @unique
+  createdAt        DateTime @default(now())
+  lastUsedAt       DateTime
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  userAgent        String?
+  ip               String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  deviceId  String?
+  runId     String?
+  actionId  String?
+  toolName  String?
+  eventType String
+  createdAt DateTime @default(now())
+  ip        String?
+  userAgent String?
+  meta      Json?
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([deviceId])
+  @@index([runId])
+  @@index([actionId])
+  @@index([eventType])
+  @@index([createdAt])
+}

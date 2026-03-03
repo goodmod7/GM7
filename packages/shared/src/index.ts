@@ -52,6 +52,13 @@ export const ScreenSource = {
 } as const;
 export type ScreenSource = (typeof ScreenSource)[keyof typeof ScreenSource];
 
+// Iteration 6: Run Mode
+export const RunMode = {
+  MANUAL: 'manual',
+  AI_ASSIST: 'ai_assist',
+} as const;
+export type RunMode = (typeof RunMode)[keyof typeof RunMode];
+
 export const ErrorCode = {
   INVALID_MESSAGE: 'INVALID_MESSAGE',
   PROTOCOL_VERSION_MISMATCH: 'PROTOCOL_VERSION_MISMATCH',
@@ -165,6 +172,8 @@ export interface DeviceAction {
   createdAt: number;
   updatedAt: number;
   error?: ActionError;
+  source?: 'web' | 'agent';
+  runId?: string;
 }
 
 // Helper to redact sensitive action data for logging
@@ -212,6 +221,207 @@ export interface DisplayInfo {
 }
 
 // ============================================================================
+// Iteration 6: AI Assist Types
+// ============================================================================
+
+export interface ProposeActionProposal {
+  kind: 'propose_action';
+  action: InputAction;
+  rationale: string;
+  confidence?: number;  // 0..1
+}
+
+export interface AskUserProposal {
+  kind: 'ask_user';
+  question: string;
+}
+
+export interface DoneProposal {
+  kind: 'done';
+  summary: string;
+}
+
+// ============================================================================
+// Iteration 7: Workspace Tools Types
+// ============================================================================
+
+// Tool names
+export const ToolName = {
+  FS_LIST: 'fs.list',
+  FS_READ_TEXT: 'fs.read_text',
+  FS_WRITE_TEXT: 'fs.write_text',
+  FS_APPLY_PATCH: 'fs.apply_patch',
+  TERMINAL_EXEC: 'terminal.exec',
+} as const;
+export type ToolName = (typeof ToolName)[keyof typeof ToolName];
+
+// ToolCall union (discriminated by tool)
+export interface FsListToolCall {
+  tool: 'fs.list';
+  path: string;
+}
+
+export interface FsReadTextToolCall {
+  tool: 'fs.read_text';
+  path: string;
+}
+
+export interface FsWriteTextToolCall {
+  tool: 'fs.write_text';
+  path: string;
+  content: string;
+}
+
+export interface FsApplyPatchToolCall {
+  tool: 'fs.apply_patch';
+  path: string;
+  patch: string;
+}
+
+export interface TerminalExecToolCall {
+  tool: 'terminal.exec';
+  cmd: string;
+  args: string[];
+  cwd?: string;
+}
+
+export type ToolCall = FsListToolCall | FsReadTextToolCall | FsWriteTextToolCall | FsApplyPatchToolCall | TerminalExecToolCall;
+
+// Tool result entry types
+export interface FsListEntry {
+  name: string;
+  kind: 'file' | 'dir';
+  size?: number;
+}
+
+// ToolResult union
+export interface FsListToolResult {
+  ok: true;
+  entries: FsListEntry[];
+  truncated?: boolean;
+}
+
+export interface FsReadTextToolResult {
+  ok: true;
+  content: string;
+  truncated?: boolean;
+}
+
+export interface FsWriteTextToolResult {
+  ok: true;
+  bytesWritten: number;
+}
+
+export interface FsApplyPatchToolResult {
+  ok: true;
+  bytesWritten: number;
+  hunksApplied: number;
+}
+
+export interface TerminalExecToolResult {
+  ok: true;
+  exitCode: number;
+  stdoutPreview: string;
+  stderrPreview: string;
+  truncated: boolean;
+}
+
+export interface ToolErrorResult {
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+  };
+}
+
+export type ToolResult = 
+  | FsListToolResult 
+  | FsReadTextToolResult 
+  | FsWriteTextToolResult 
+  | FsApplyPatchToolResult 
+  | TerminalExecToolResult 
+  | ToolErrorResult;
+
+// Workspace state (privacy-respecting)
+export interface WorkspaceState {
+  configured: boolean;
+  rootName?: string;  // Never expose absolute path to server/web by default
+}
+
+// ============================================================================
+// Iteration 8: Tool Event Lifecycle
+// ============================================================================
+
+export const ToolEventStatus = {
+  REQUESTED: 'requested',
+  AWAITING_USER: 'awaiting_user',
+  APPROVED: 'approved',
+  DENIED: 'denied',
+  EXECUTED: 'executed',
+  FAILED: 'failed',
+} as const;
+export type ToolEventStatus = (typeof ToolEventStatus)[keyof typeof ToolEventStatus];
+
+// Tool summary (stored on server - no file contents)
+export interface ToolSummary {
+  toolEventId: string;
+  toolCallId: string;
+  runId?: string;
+  deviceId: string;
+  tool: ToolName;
+  // For fs.*: relative path inside workspace; for terminal: command name only
+  pathRel?: string; // fs tools only
+  cmd?: string; // terminal only (command name ONLY, no args)
+  status: ToolEventStatus;
+  // Additional metadata (exitCode for terminal, bytesWritten for fs, etc.)
+  exitCode?: number;
+  truncated?: boolean;
+  bytesWritten?: number;
+  hunksApplied?: number;
+  errorCode?: string;
+  at: number;
+}
+
+// Helper to redact tool call for logging (never log content or args)
+export function redactToolCallForLog(toolCall: ToolCall): { tool: ToolName; pathRel?: string; cmd?: string } {
+  const t = toolCall.tool;
+  switch (t) {
+    case 'fs.list':
+    case 'fs.read_text':
+    case 'fs.write_text':
+    case 'fs.apply_patch':
+      return { tool: t, pathRel: (toolCall as { path: string }).path };
+    case 'terminal.exec':
+      return { tool: t, cmd: (toolCall as { cmd: string }).cmd };
+    default:
+      // Exhaustive check - should not reach here
+      return { tool: t as ToolName };
+  }
+}
+
+// Propose tool variant for AgentProposal
+export interface ProposeToolProposal {
+  kind: 'propose_tool';
+  toolCall: ToolCall;
+  rationale: string;
+  confidence?: number;  // 0..1
+}
+
+// Extended AgentProposal with propose_tool
+export type AgentProposal = ProposeActionProposal | ProposeToolProposal | AskUserProposal | DoneProposal;
+
+export interface RunConstraints {
+  maxActions: number;
+  maxRuntimeMinutes: number;
+}
+
+// Default constraints for AI Assist runs
+export const DEFAULT_RUN_CONSTRAINTS: RunConstraints = {
+  maxActions: 20,
+  maxRuntimeMinutes: 20,
+};
+
+// ============================================================================
 // Domain Types (for API/store usage)
 // ============================================================================
 
@@ -255,6 +465,8 @@ export interface Device {
   screenStreamState?: ScreenStreamState;
   // Iteration 5: remote control state
   controlState?: ControlState;
+  // Iteration 7: workspace state
+  workspaceState?: WorkspaceState;
   socket?: unknown;
 }
 
@@ -271,6 +483,12 @@ export interface Run {
     text: string;
     createdAt: number;
   }>;
+  // Iteration 6: AI Assist fields
+  mode?: RunMode;
+  constraints?: RunConstraints;
+  actionCount?: number;
+  lastAgentEventAt?: number;
+  latestProposal?: AgentProposal;
 }
 
 export interface RunWithSteps extends Run {
@@ -306,6 +524,7 @@ export const deviceHelloSchema = z.object({
     deviceName: z.string().optional(),
     platform: z.enum(['macos', 'windows', 'linux', 'unknown']),
     appVersion: z.string().optional(),
+    deviceToken: z.string().optional(),
   }),
 });
 
@@ -484,6 +703,246 @@ export const deviceActionResultSchema = z.object({
   }),
 });
 
+// Iteration 6: AI Assist device messages
+export const deviceRunStepUpdateSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.run.step_update'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    runId: z.string(),
+    step: z.object({
+      stepId: z.string(),
+      title: z.string(),
+      status: z.enum(['pending', 'running', 'done', 'failed', 'blocked']),
+      startedAt: z.number().optional(),
+      endedAt: z.number().optional(),
+      logs: z.array(z.object({
+        line: z.string(),
+        level: z.enum(['info', 'warn', 'error']),
+        at: z.number(),
+      })),
+    }),
+  }),
+});
+
+export const deviceRunLogSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.run.log'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    runId: z.string(),
+    stepId: z.string().optional(),
+    line: z.string(),
+    level: z.enum(['info', 'warn', 'error']),
+    at: z.number(),
+  }),
+});
+
+// InputAction schemas for agent proposal
+const clickActionSchema = z.object({
+  kind: z.literal('click'),
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  button: z.enum(['left', 'right', 'middle']),
+});
+
+const doubleClickActionSchema = z.object({
+  kind: z.literal('double_click'),
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  button: z.enum(['left', 'right', 'middle']),
+});
+
+const scrollActionSchema = z.object({
+  kind: z.literal('scroll'),
+  dx: z.number().int().min(-2000).max(2000),
+  dy: z.number().int().min(-2000).max(2000),
+});
+
+const typeActionSchema = z.object({
+  kind: z.literal('type'),
+  text: z.string().max(500),
+});
+
+const hotkeyActionSchema = z.object({
+  kind: z.literal('hotkey'),
+  key: z.enum(['enter', 'tab', 'escape', 'backspace', 'up', 'down', 'left', 'right']),
+  modifiers: z.array(z.enum(['shift', 'ctrl', 'alt', 'meta'])).optional(),
+});
+
+const inputActionSchema = z.union([
+  clickActionSchema,
+  doubleClickActionSchema,
+  scrollActionSchema,
+  typeActionSchema,
+  hotkeyActionSchema,
+]);
+
+const proposeActionProposalSchema = z.object({
+  kind: z.literal('propose_action'),
+  action: inputActionSchema,
+  rationale: z.string().max(2000),
+  confidence: z.number().min(0).max(1).optional(),
+});
+
+const askUserProposalSchema = z.object({
+  kind: z.literal('ask_user'),
+  question: z.string().max(2000),
+});
+
+const doneProposalSchema = z.object({
+  kind: z.literal('done'),
+  summary: z.string().max(2000),
+});
+
+// Iteration 7: Tool call schemas for propose_tool
+// Iteration 8: Added length constraints for security
+const fsListToolCallSchema = z.object({
+  tool: z.literal('fs.list'),
+  path: z.string().max(260),
+});
+
+const fsReadTextToolCallSchema = z.object({
+  tool: z.literal('fs.read_text'),
+  path: z.string().max(260),
+});
+
+const fsWriteTextToolCallSchema = z.object({
+  tool: z.literal('fs.write_text'),
+  path: z.string().max(260),
+  content: z.string(),
+});
+
+const fsApplyPatchToolCallSchema = z.object({
+  tool: z.literal('fs.apply_patch'),
+  path: z.string().max(260),
+  patch: z.string(),
+});
+
+const terminalExecToolCallSchema = z.object({
+  tool: z.literal('terminal.exec'),
+  cmd: z.string().max(64),
+  args: z.array(z.string()),
+  cwd: z.string().max(260).optional(),
+});
+
+const toolCallSchema = z.union([
+  fsListToolCallSchema,
+  fsReadTextToolCallSchema,
+  fsWriteTextToolCallSchema,
+  fsApplyPatchToolCallSchema,
+  terminalExecToolCallSchema,
+]);
+
+const proposeToolProposalSchema = z.object({
+  kind: z.literal('propose_tool'),
+  toolCall: toolCallSchema,
+  rationale: z.string().max(2000),
+  confidence: z.number().min(0).max(1).optional(),
+});
+
+const agentProposalSchema = z.union([
+  proposeActionProposalSchema,
+  proposeToolProposalSchema,
+  askUserProposalSchema,
+  doneProposalSchema,
+]);
+
+export const deviceAgentProposalSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.agent.proposal'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    runId: z.string(),
+    proposal: agentProposalSchema,
+  }),
+});
+
+export const deviceActionCreateSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.action.create'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    actionId: z.string(),
+    runId: z.string().optional(),
+    action: inputActionSchema,
+    source: z.literal('agent'),
+    createdAt: z.number(),
+  }),
+});
+
+// Iteration 7: Workspace tool messages
+export const deviceWorkspaceStateSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.workspace.state'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    workspaceState: z.object({
+      configured: z.boolean(),
+      rootName: z.string().optional(),
+    }),
+  }),
+});
+
+export const deviceDeviceTokenAckSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.device_token.ack'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+  }),
+});
+
+export const deviceToolRequestSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.tool.request'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    runId: z.string(),
+    toolEventId: z.string(),
+    toolCallId: z.string(),
+    toolCall: toolCallSchema,
+    at: z.number(),
+  }),
+});
+
+export const deviceToolResultSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('device.tool.result'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    runId: z.string(),
+    toolEventId: z.string(),
+    toolCallId: z.string(),
+    toolCall: toolCallSchema,
+    result: z.object({
+      ok: z.boolean(),
+      error: z.object({ code: z.string(), message: z.string() }).optional(),
+      // Optional fields depending on result type
+      exitCode: z.number().optional(),
+      truncated: z.boolean().optional(),
+      bytesWritten: z.number().optional(),
+      hunksApplied: z.number().optional(),
+    }),
+    at: z.number(),
+  }),
+});
+
 export const deviceMessageSchema = z.union([
   deviceHelloSchema,
   devicePairingRequestCodeSchema,
@@ -499,6 +958,16 @@ export const deviceMessageSchema = z.union([
   deviceControlStateSchema,
   deviceActionAckSchema,
   deviceActionResultSchema,
+  // Iteration 6
+  deviceRunStepUpdateSchema,
+  deviceRunLogSchema,
+  deviceAgentProposalSchema,
+  deviceActionCreateSchema,
+  // Iteration 7
+  deviceWorkspaceStateSchema,
+  deviceDeviceTokenAckSchema,
+  deviceToolRequestSchema,
+  deviceToolResultSchema,
 ]);
 
 export type DeviceHello = z.infer<typeof deviceHelloSchema>;
@@ -515,6 +984,16 @@ export type DeviceScreenFrame = z.infer<typeof deviceScreenFrameSchema>;
 export type DeviceControlState = z.infer<typeof deviceControlStateSchema>;
 export type DeviceActionAck = z.infer<typeof deviceActionAckSchema>;
 export type DeviceActionResult = z.infer<typeof deviceActionResultSchema>;
+// Iteration 6
+export type DeviceRunStepUpdate = z.infer<typeof deviceRunStepUpdateSchema>;
+export type DeviceRunLog = z.infer<typeof deviceRunLogSchema>;
+export type DeviceAgentProposal = z.infer<typeof deviceAgentProposalSchema>;
+export type DeviceActionCreate = z.infer<typeof deviceActionCreateSchema>;
+// Iteration 7
+export type DeviceWorkspaceState = z.infer<typeof deviceWorkspaceStateSchema>;
+export type DeviceDeviceTokenAck = z.infer<typeof deviceDeviceTokenAckSchema>;
+export type DeviceToolRequest = z.infer<typeof deviceToolRequestSchema>;
+export type DeviceToolResult = z.infer<typeof deviceToolResultSchema>;
 export type DeviceMessage = z.infer<typeof deviceMessageSchema>;
 
 // ============================================================================
@@ -559,6 +1038,7 @@ export const serverChatMessageSchema = z.object({
   }),
 });
 
+// Iteration 6: Extended server.run.start with mode and constraints
 export const serverRunStartSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('server.run.start'),
@@ -568,6 +1048,12 @@ export const serverRunStartSchema = z.object({
     deviceId: z.string(),
     runId: z.string(),
     goal: z.string(),
+    // Iteration 6: optional mode and constraints (defaults to manual for backward compat)
+    mode: z.enum(['manual', 'ai_assist']).optional(),
+    constraints: z.object({
+      maxActions: z.number().int().positive(),
+      maxRuntimeMinutes: z.number().int().positive(),
+    }).optional(),
   }),
 });
 
@@ -633,6 +1119,15 @@ export const serverRunDetailsSchema = z.object({
       createdAt: z.number(),
       updatedAt: z.number(),
       reason: z.string().optional(),
+      // Iteration 6
+      mode: z.enum(['manual', 'ai_assist']).optional(),
+      constraints: z.object({
+        maxActions: z.number().int().positive(),
+        maxRuntimeMinutes: z.number().int().positive(),
+      }).optional(),
+      actionCount: z.number().int().optional(),
+      lastAgentEventAt: z.number().optional(),
+      latestProposal: agentProposalSchema.optional(),
       steps: z.array(z.object({
         stepId: z.string(),
         title: z.string(),
@@ -751,46 +1246,6 @@ export const serverScreenAckSchema = z.object({
   ]),
 });
 
-// Iteration 5: InputAction schema for validation
-const clickActionSchema = z.object({
-  kind: z.literal('click'),
-  x: z.number().min(0).max(1),
-  y: z.number().min(0).max(1),
-  button: z.enum(['left', 'right', 'middle']),
-});
-
-const doubleClickActionSchema = z.object({
-  kind: z.literal('double_click'),
-  x: z.number().min(0).max(1),
-  y: z.number().min(0).max(1),
-  button: z.enum(['left', 'right', 'middle']),
-});
-
-const scrollActionSchema = z.object({
-  kind: z.literal('scroll'),
-  dx: z.number().int().min(-2000).max(2000),
-  dy: z.number().int().min(-2000).max(2000),
-});
-
-const typeActionSchema = z.object({
-  kind: z.literal('type'),
-  text: z.string().max(500),
-});
-
-const hotkeyActionSchema = z.object({
-  kind: z.literal('hotkey'),
-  key: z.enum(['enter', 'tab', 'escape', 'backspace', 'up', 'down', 'left', 'right']),
-  modifiers: z.array(z.enum(['shift', 'ctrl', 'alt', 'meta'])).optional(),
-});
-
-export const inputActionSchema = z.union([
-  clickActionSchema,
-  doubleClickActionSchema,
-  scrollActionSchema,
-  typeActionSchema,
-  hotkeyActionSchema,
-]);
-
 // Iteration 5: server.action.request schema
 export const serverActionRequestSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
@@ -802,6 +1257,17 @@ export const serverActionRequestSchema = z.object({
     actionId: z.string(),
     action: inputActionSchema,
     requestedAt: z.number(),
+  }),
+});
+
+export const serverDeviceTokenSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('server.device.token'),
+  requestId: z.string().optional(),
+  ts: z.number(),
+  payload: z.object({
+    deviceId: z.string(),
+    deviceToken: z.string(),
   }),
 });
 
@@ -820,6 +1286,7 @@ export const serverMessageSchema = z.union([
   serverRunCanceledSchema,
   serverScreenAckSchema,
   serverActionRequestSchema,
+  serverDeviceTokenSchema,
 ]);
 
 export type ServerHelloAck = z.infer<typeof serverHelloAckSchema>;
@@ -836,6 +1303,7 @@ export type ServerApprovalRequest = z.infer<typeof serverApprovalRequestSchema>;
 export type ServerRunCanceled = z.infer<typeof serverRunCanceledSchema>;
 export type ServerScreenAck = z.infer<typeof serverScreenAckSchema>;
 export type ServerActionRequest = z.infer<typeof serverActionRequestSchema>;
+export type ServerDeviceToken = z.infer<typeof serverDeviceTokenSchema>;
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
 // ============================================================================
@@ -915,4 +1383,5 @@ export type ServerEventType =
   | { type: 'step_update'; runId: string; step: RunStep }
   | { type: 'log_line'; runId: string; stepId?: string; log: LogLine }
   | { type: 'screen_update'; deviceId: string; meta: ScreenFrameMeta }
-  | { type: 'action_update'; action: DeviceAction };
+  | { type: 'action_update'; action: DeviceAction }
+  | { type: 'tool_update'; tool: ToolSummary };

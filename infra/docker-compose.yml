@@ -5,15 +5,15 @@ services:
     image: postgres:16-alpine
     container_name: ai-operator-postgres
     environment:
-      POSTGRES_USER: aioperator
-      POSTGRES_PASSWORD: devpassword
-      POSTGRES_DB: aioperator
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_operator
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aioperator"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5

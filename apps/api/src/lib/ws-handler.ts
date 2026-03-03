@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { WebSocket } from '@fastify/websocket';
+import { randomUUID } from 'node:crypto';
 import type {
   DeviceMessage,
   ServerMessage,
@@ -8,28 +9,166 @@ import type {
   ScreenStreamState,
   ControlState,
   ActionStatus,
+  RunStep,
+  LogLine,
+  AgentProposal,
+  WorkspaceState,
+  ToolSummary,
+  ToolEventStatus,
+  ToolCall,
+  InputAction,
 } from '@ai-operator/shared';
 import {
   PROTOCOL_VERSION,
   parseDeviceMessage,
   createServerMessage,
   ErrorCode,
+  redactActionForLog,
 } from '@ai-operator/shared';
 import { deviceStore } from '../store/devices.js';
 import { runStore } from '../store/runs.js';
 import { screenStore } from '../store/screen.js';
 import { actionStore } from '../store/actions.js';
+import { toolStore } from '../store/tools.js';
 import { createRunEngine } from '../engine/runEngine.js';
+import { redactToolCallForLogs } from './tool-redaction.js';
+import { devicesRepo } from '../repos/devices.js';
+import { auditRepo } from '../repos/audit.js';
+import { runsRepo } from '../repos/runs.js';
+import { actionsRepo } from '../repos/actions.js';
+import { toolsRepo } from '../repos/tools.js';
+import { config } from '../config.js';
+import { ownership } from './ownership.js';
+import { consumeRateLimit } from './ratelimit.js';
 
 // Track connected sockets and their device IDs
 interface SocketState {
+  connectionId: string;
   deviceId: string;
   helloReceived: boolean;
+  ownerUserId?: string | null;
+  ip?: string | null;
+  userAgent?: string | null;
 }
 const socketToDevice = new Map<WebSocket, SocketState>();
 
 // HELLO timeout in ms
 const HELLO_TIMEOUT_MS = 10_000;
+
+function getHeaderValue(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    return typeof value[0] === 'string' ? value[0] : null;
+  }
+  return typeof value === 'string' ? value : null;
+}
+
+function getCoarseIp(ip: string | undefined): string | null {
+  if (!ip) {
+    return null;
+  }
+  if (ip.includes('.')) {
+    const parts = ip.split('.');
+    if (parts.length === 4) {
+      return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+    }
+  }
+  if (ip.includes(':')) {
+    return `${ip.split(':').slice(0, 4).join(':')}::`;
+  }
+  return ip;
+}
+
+function getSocketAuditContext(state: SocketState | undefined) {
+  return {
+    ip: state?.ip ?? null,
+    userAgent: state?.userAgent ?? null,
+  };
+}
+
+async function createSocketAuditEvent(
+  state: SocketState | undefined,
+  event: {
+    userId?: string | null;
+    deviceId?: string | null;
+    runId?: string | null;
+    actionId?: string | null;
+    toolName?: string | null;
+    eventType: string;
+    meta?: Record<string, unknown> | null;
+  }
+) {
+  const context = getSocketAuditContext(state);
+  try {
+    await auditRepo.createEvent({
+      ...event,
+      ip: context.ip,
+      userAgent: context.userAgent,
+    });
+  } catch {
+    // Do not fail live device traffic if audit persistence is unavailable.
+  }
+}
+
+function getActionAuditMeta(action: InputAction): Record<string, unknown> {
+  if (action.kind === 'type') {
+    return { kind: 'type', length: action.text.length };
+  }
+  if (action.kind === 'hotkey') {
+    return { kind: 'hotkey', key: action.key };
+  }
+  return { kind: action.kind };
+}
+
+function getToolAuditMeta(toolCall: ToolCall, result?: { ok: boolean; exitCode?: number; error?: { code?: string } }): Record<string, unknown> {
+  if (toolCall.tool === 'terminal.exec') {
+    const binary = toolCall.cmd.trim().split(/\s+/)[0] || 'unknown';
+    return {
+      tool: toolCall.tool,
+      cmd: binary,
+      exitCode: result?.exitCode,
+      ok: result?.ok,
+      errorCode: result?.error?.code,
+    };
+  }
+
+  return {
+    tool: toolCall.tool,
+    pathRel: 'path' in toolCall ? toolCall.path : undefined,
+    exitCode: result?.exitCode,
+    ok: result?.ok,
+    errorCode: result?.error?.code,
+  };
+}
+
+function enforceSocketRateLimit(
+  socket: WebSocket,
+  fastify: FastifyInstance,
+  state: SocketState | undefined,
+  key: string,
+  limit: number,
+  windowMs: number
+): boolean {
+  const result = consumeRateLimit(key, limit, windowMs);
+  if (result.allowed) {
+    return true;
+  }
+
+  fastify.log.warn(
+    {
+      connectionId: state?.connectionId,
+      deviceId: state?.deviceId,
+      retryAfterSeconds: result.retryAfterSeconds,
+    },
+    'WebSocket message rate limited'
+  );
+
+  const errorMsg = createServerMessage('server.error', {
+    code: ErrorCode.INTERNAL_ERROR,
+    message: 'Rate limited',
+  });
+  socket.send(JSON.stringify(errorMsg));
+  return false;
+}
 
 export function generatePairingCode(): string {
   // Generate 8 character uppercase alphanumeric code
@@ -43,14 +182,24 @@ export function generatePairingCode(): string {
 
 export function setupWebSocket(fastify: FastifyInstance) {
   fastify.get('/ws', { websocket: true }, (socket: WebSocket, req: FastifyRequest) => {
-    const clientIp = req.ip;
-    fastify.log.info({ clientIp }, 'WebSocket client connected');
+    const connectionId = randomUUID();
+    const clientIp = getCoarseIp(req.ip);
+    const userAgent = getHeaderValue(req.headers['user-agent']);
+    socketToDevice.set(socket, {
+      connectionId,
+      deviceId: 'unknown',
+      helloReceived: false,
+      ip: clientIp,
+      userAgent,
+    });
+
+    fastify.log.info({ connectionId, clientIp, count: socketToDevice.size }, 'WebSocket client connected');
 
     // Set hello timeout
     const helloTimeout = setTimeout(() => {
       const state = socketToDevice.get(socket);
       if (!state?.helloReceived) {
-        fastify.log.warn({ clientIp }, 'Client failed to send hello in time, closing connection');
+        fastify.log.warn({ connectionId, clientIp }, 'Client failed to send hello in time, closing connection');
         const errorMsg = createServerMessage('server.error', {
           code: ErrorCode.MISSING_HELLO,
           message: 'Hello message not received within timeout period',
@@ -63,7 +212,19 @@ export function setupWebSocket(fastify: FastifyInstance) {
     socket.on('message', (raw: Buffer) => {
       try {
         const parsed = JSON.parse(raw.toString());
-        fastify.log.debug({ msg: parsed }, 'Received WebSocket message');
+        const messageType = typeof parsed?.type === 'string' ? parsed.type : 'unknown';
+        const requestId = typeof parsed?.requestId === 'string' ? parsed.requestId : null;
+        const state = socketToDevice.get(socket);
+
+        fastify.log.debug(
+          {
+            connectionId: state?.connectionId ?? connectionId,
+            deviceId: state?.deviceId,
+            messageType,
+            requestId,
+          },
+          'Received WebSocket message'
+        );
 
         // Check protocol version first
         if (parsed.v !== PROTOCOL_VERSION) {
@@ -78,7 +239,14 @@ export function setupWebSocket(fastify: FastifyInstance) {
         // Validate message
         const validation = parseDeviceMessage(parsed);
         if (!validation.success) {
-          fastify.log.warn({ error: validation.error, raw: parsed }, 'Invalid device message');
+          fastify.log.warn(
+            {
+              connectionId: state?.connectionId ?? connectionId,
+              messageType,
+              error: validation.error,
+            },
+            'Invalid device message'
+          );
           const errorMsg = createServerMessage('server.error', {
             code: ErrorCode.INVALID_MESSAGE,
             message: `Invalid message: ${validation.error}`,
@@ -88,10 +256,10 @@ export function setupWebSocket(fastify: FastifyInstance) {
         }
 
         const message = validation.data;
-        const state = socketToDevice.get(socket);
+        const nextState = socketToDevice.get(socket);
 
         // Require hello as first message
-        if (!state?.helloReceived && message.type !== 'device.hello') {
+        if (!nextState?.helloReceived && message.type !== 'device.hello') {
           const errorMsg = createServerMessage('server.error', {
             code: ErrorCode.MISSING_HELLO,
             message: 'Expected device.hello as first message',
@@ -100,7 +268,14 @@ export function setupWebSocket(fastify: FastifyInstance) {
           return;
         }
 
-        handleDeviceMessage(socket, message, fastify);
+        void handleDeviceMessage(socket, message, fastify).catch((err) => {
+          fastify.log.error({ err }, 'Failed to process device message');
+          const errorMsg = createServerMessage('server.error', {
+            code: ErrorCode.INTERNAL_ERROR,
+            message: 'Failed to process message',
+          });
+          socket.send(JSON.stringify(errorMsg));
+        });
       } catch (err) {
         fastify.log.error({ err }, 'Failed to process WebSocket message');
         const errorMsg = createServerMessage('server.error', {
@@ -115,33 +290,65 @@ export function setupWebSocket(fastify: FastifyInstance) {
       clearTimeout(helloTimeout);
       const state = socketToDevice.get(socket);
       if (state) {
-        deviceStore.setConnected(state.deviceId, false);
         socketToDevice.delete(socket);
-        fastify.log.info({ deviceId: state.deviceId }, 'Device disconnected');
+        if (state.helloReceived) {
+          deviceStore.setConnected(state.deviceId, false);
+          fastify.log.info({ connectionId: state.connectionId, deviceId: state.deviceId, count: socketToDevice.size }, 'Device disconnected');
+        } else {
+          fastify.log.info({ connectionId: state.connectionId, clientIp: state.ip, count: socketToDevice.size }, 'Client disconnected (never sent hello)');
+        }
       } else {
-        fastify.log.info({ clientIp }, 'Client disconnected (never sent hello)');
+        fastify.log.info({ connectionId, clientIp, count: socketToDevice.size }, 'Client disconnected (never sent hello)');
       }
     });
 
     socket.on('error', (err: Error) => {
-      fastify.log.error({ err, clientIp }, 'WebSocket error');
+      fastify.log.error({ err, connectionId, clientIp }, 'WebSocket error');
     });
   });
 }
 
-function handleDeviceMessage(
+async function handleDeviceMessage(
   socket: WebSocket,
   message: DeviceMessage,
   fastify: FastifyInstance
-): void {
+): Promise<void> {
   const { type, payload, requestId } = message;
 
   switch (type) {
     case 'device.hello': {
-      const { deviceId, deviceName, platform, appVersion } = payload;
+      const { deviceId, deviceName, platform, appVersion, deviceToken } = payload;
+      const existingState = socketToDevice.get(socket);
+
+      let ownerUserId: string | null = null;
+      if (deviceToken) {
+        const tokenMatch = await devicesRepo.findByDeviceToken(deviceToken);
+        if (!tokenMatch || tokenMatch.device.deviceId !== deviceId) {
+          await createSocketAuditEvent(existingState, {
+            deviceId,
+            eventType: 'device.hello_token_denied',
+          });
+          const errorMsg = createServerMessage('server.error', {
+            code: ErrorCode.DEVICE_NOT_FOUND,
+            message: 'Invalid device token',
+          });
+          socket.send(JSON.stringify(errorMsg));
+          socket.close();
+          return;
+        }
+        ownerUserId = tokenMatch.ownerUserId ?? null;
+      }
 
       // Mark hello received
-      socketToDevice.set(socket, { deviceId, helloReceived: true });
+      socketToDevice.set(socket, {
+        connectionId: existingState?.connectionId ?? randomUUID(),
+        deviceId,
+        helloReceived: true,
+        ownerUserId,
+        ip: existingState?.ip ?? null,
+        userAgent: existingState?.userAgent ?? null,
+      });
+      const state = socketToDevice.get(socket);
 
       // Register/update device
       deviceStore.upsert({
@@ -152,8 +359,21 @@ function handleDeviceMessage(
         connected: true,
         socket,
       });
+      ownership.setDeviceOwner(deviceId, ownerUserId);
+      await devicesRepo.upsertHello({
+        deviceId,
+        deviceName,
+        platform: platform as Platform,
+        appVersion,
+        ownerUserId,
+      });
 
-      fastify.log.info({ deviceId, deviceName, platform }, 'Device registered');
+      fastify.log.info({ connectionId: state?.connectionId, deviceId, platform }, 'Device registered');
+      await createSocketAuditEvent(state, {
+        userId: ownerUserId,
+        deviceId,
+        eventType: deviceToken ? 'device.hello_token_accepted' : 'device.hello',
+      });
 
       // Check if device has any active runs and send details
       const activeRuns = runStore.getByDevice(deviceId).filter(
@@ -194,8 +414,9 @@ function handleDeviceMessage(
       const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
 
       deviceStore.setPairingCode(deviceId, pairingCode, expiresAt);
+      await devicesRepo.setPairingCode(deviceId, pairingCode, expiresAt);
 
-      fastify.log.info({ deviceId, pairingCode }, 'Generated pairing code');
+      fastify.log.info({ deviceId }, 'Generated pairing code');
 
       const response = createServerMessage(
         'server.pairing.code',
@@ -215,7 +436,7 @@ function handleDeviceMessage(
     case 'device.chat.send': {
       const { deviceId, runId, message: chatMsg } = payload;
 
-      fastify.log.info({ deviceId, runId, text: chatMsg.text.substring(0, 100) }, 'Chat message received');
+      fastify.log.info({ deviceId, runId }, 'Chat message received');
 
       // Add to run if specified
       if (runId) {
@@ -239,10 +460,20 @@ function handleDeviceMessage(
     case 'device.run.update': {
       const { deviceId, runId, status, note } = payload;
 
-      fastify.log.info({ deviceId, runId, status, note }, 'Run status update');
+      fastify.log.info({ deviceId, runId, status }, 'Run status update');
 
       const run = runStore.updateStatus(runId, status, note);
       if (run) {
+        await persistRun(runId);
+        const ownerUserId = ownership.getRunOwner(runId) ?? undefined;
+        if (status === 'done' || status === 'failed' || status === 'canceled') {
+          await createSocketAuditEvent(socketToDevice.get(socket), {
+            userId: ownerUserId,
+            deviceId,
+            runId,
+            eventType: `run.${status}`,
+          });
+        }
         const response = createServerMessage(
           'server.run.status',
           { deviceId, runId, status },
@@ -262,6 +493,7 @@ function handleDeviceMessage(
     case 'device.ping': {
       const { deviceId } = payload;
       deviceStore.updateLastSeen(deviceId);
+      await devicesRepo.updateLastSeen(deviceId);
 
       const response = createServerMessage(
         'server.pong',
@@ -275,15 +507,25 @@ function handleDeviceMessage(
     case 'device.run.accept': {
       const { deviceId, runId } = payload;
       fastify.log.info({ deviceId, runId }, 'Run accepted by device');
-      // Acknowledge receipt
+      
       const run = runStore.get(runId);
       if (run) {
-        // Start the run engine if not already running
-        let engine = runStore.getEngine(runId);
-        if (!engine && (run.status === 'queued' || run.status === 'running')) {
-          engine = createRunEngine(runId, fastify);
-          runStore.setEngine(runId, engine);
-          engine.start();
+        // Only start the server run engine for manual mode
+        // AI Assist mode is handled entirely on the device
+        if (run.mode !== 'ai_assist') {
+          // Start the run engine if not already running
+          let engine = runStore.getEngine(runId);
+          if (!engine && (run.status === 'queued' || run.status === 'running')) {
+            engine = createRunEngine(runId, fastify);
+            runStore.setEngine(runId, engine);
+            engine.start();
+          }
+        } else {
+          // For AI Assist, just mark as running and let device handle it
+          runStore.updateStatus(runId, 'running');
+          await persistRun(runId);
+          sseBroadcast({ type: 'run_update', run: runStore.get(runId)! });
+          fastify.log.info({ runId }, 'AI Assist run accepted - device will drive execution');
         }
       }
       break;
@@ -291,7 +533,7 @@ function handleDeviceMessage(
 
     case 'device.approval.decision': {
       const { deviceId, runId, approvalId, decision, comment } = payload;
-      fastify.log.info({ deviceId, runId, approvalId, decision, comment }, 'Approval decision received');
+      fastify.log.info({ deviceId, runId, approvalId, decision }, 'Approval decision received');
 
       const run = runStore.get(runId);
       if (!run) {
@@ -312,7 +554,7 @@ function handleDeviceMessage(
         return;
       }
 
-      // Pass decision to run engine
+      // Pass decision to run engine (only for manual mode)
       const engine = runStore.getEngine(runId);
       if (engine) {
         engine.handleApproval(decision as ApprovalDecision, comment);
@@ -326,6 +568,13 @@ function handleDeviceMessage(
 
       const run = runStore.cancel(runId, 'Canceled by device');
       if (run) {
+        await persistRun(runId);
+        await createSocketAuditEvent(socketToDevice.get(socket), {
+          userId: ownership.getRunOwner(runId) ?? undefined,
+          deviceId,
+          runId,
+          eventType: 'run.canceled',
+        });
         const response = createServerMessage('server.run.canceled', {
           deviceId,
           runId,
@@ -360,6 +609,7 @@ function handleDeviceMessage(
       if (!state.enabled) {
         screenStore.clearFrame(deviceId);
       }
+      await devicesRepo.updateScreenStreamState(deviceId, state as ScreenStreamState);
 
       // Acknowledge
       const response = createServerMessage(
@@ -464,6 +714,7 @@ function handleDeviceMessage(
         socket.send(JSON.stringify(errorMsg));
         return;
       }
+      await devicesRepo.updateControlState(deviceId, state as ControlState);
 
       // Broadcast device update via SSE
       sseBroadcast({ type: 'device_update', device: deviceStore.get(deviceId)! });
@@ -472,10 +723,32 @@ function handleDeviceMessage(
 
     case 'device.action.ack': {
       const { deviceId, actionId, status } = payload;
+      const state = socketToDevice.get(socket);
+      if (!enforceSocketRateLimit(
+        socket,
+        fastify,
+        state,
+        `device:${deviceId}:control:ingest`,
+        config.CONTROL_ACTIONS_PER_10S,
+        10_000
+      )) {
+        return;
+      }
       fastify.log.info({ deviceId, actionId, status }, 'Action ack received');
 
       const action = actionStore.setStatus(actionId, status as ActionStatus);
       if (action) {
+        const ownerUserId = ownership.getActionOwner(actionId);
+        if (ownerUserId) {
+          await actionsRepo.save(action, ownerUserId);
+        }
+        await createSocketAuditEvent(state, {
+          userId: ownerUserId,
+          deviceId,
+          actionId,
+          eventType: `control.${status}`,
+          meta: getActionAuditMeta(action.action),
+        });
         sseBroadcast({ type: 'action_update', action });
       }
       break;
@@ -483,12 +756,306 @@ function handleDeviceMessage(
 
     case 'device.action.result': {
       const { deviceId, actionId, ok, error } = payload;
+      const state = socketToDevice.get(socket);
+      if (!enforceSocketRateLimit(
+        socket,
+        fastify,
+        state,
+        `device:${deviceId}:control:ingest`,
+        config.CONTROL_ACTIONS_PER_10S,
+        10_000
+      )) {
+        return;
+      }
       fastify.log.info({ deviceId, actionId, ok }, 'Action result received');
 
       const action = actionStore.setResult(actionId, ok, error);
       if (action) {
+        const ownerUserId = ownership.getActionOwner(actionId);
+        if (ownerUserId) {
+          await actionsRepo.save(action, ownerUserId);
+        }
+        await createSocketAuditEvent(state, {
+          userId: ownerUserId,
+          deviceId,
+          actionId,
+          eventType: ok ? 'control.executed' : 'control.failed',
+          meta: getActionAuditMeta(action.action),
+        });
         sseBroadcast({ type: 'action_update', action });
       }
+      break;
+    }
+
+    // Iteration 6: AI Assist - Device driven updates
+    case 'device.run.step_update': {
+      const { deviceId, runId, step } = payload;
+      fastify.log.info({ deviceId, runId, stepId: step.stepId, status: step.status }, 'Device step update received');
+
+      const run = runStore.applyDeviceStepUpdate(runId, step as RunStep);
+      if (run) {
+        await persistRun(runId);
+        // Broadcast step update via SSE
+        sseBroadcast({ type: 'step_update', runId, step: step as RunStep });
+        sseBroadcast({ type: 'run_update', run });
+      } else {
+        fastify.log.warn({ runId }, 'Failed to apply device step update - run not found or not ai_assist mode');
+      }
+      break;
+    }
+
+    case 'device.run.log': {
+      const { deviceId, runId, stepId, line, level, at } = payload;
+      fastify.log.info({ deviceId, runId, stepId, level }, 'Device run log received');
+
+      const logLine: LogLine = { line, level, at };
+      const run = runStore.addRunLog(runId, logLine);
+      if (run) {
+        await persistRun(runId);
+        // Broadcast log via SSE
+        sseBroadcast({ type: 'log_line', runId, stepId, log: logLine });
+      }
+      break;
+    }
+
+    case 'device.agent.proposal': {
+      const { deviceId, runId, proposal } = payload;
+      fastify.log.info({ deviceId, runId, proposalKind: proposal.kind }, 'Agent proposal received');
+
+      const run = runStore.applyAgentProposal(runId, proposal as AgentProposal);
+      if (run) {
+        await persistRun(runId);
+        // Broadcast run update with new proposal
+        sseBroadcast({ type: 'run_update', run });
+      } else {
+        fastify.log.warn({ runId }, 'Failed to apply agent proposal - run not found or not ai_assist mode');
+      }
+      break;
+    }
+
+    case 'device.action.create': {
+      const { deviceId, actionId, runId, action, source, createdAt } = payload;
+      const state = socketToDevice.get(socket);
+      if (!enforceSocketRateLimit(
+        socket,
+        fastify,
+        state,
+        `device:${deviceId}:control:ingest`,
+        config.CONTROL_ACTIONS_PER_10S,
+        10_000
+      )) {
+        return;
+      }
+      
+      // Log with redaction for sensitive data
+      fastify.log.info({ 
+        actionId, 
+        deviceId, 
+        runId,
+        source,
+        action: redactActionForLog(action),
+      }, 'Device action create received');
+
+      // Create action record (already approved locally)
+      const deviceAction = actionStore.createActionFromDevice(
+        actionId,
+        deviceId,
+        action,
+        source,
+        createdAt,
+        runId
+      );
+      const ownerUserId = runId
+        ? ownership.getRunOwner(runId)
+        : ownership.getDeviceOwner(deviceId) ?? undefined;
+      if (ownerUserId) {
+        ownership.setActionOwner(actionId, ownerUserId);
+        await actionsRepo.save(deviceAction, ownerUserId);
+      }
+      await createSocketAuditEvent(state, {
+        userId: ownerUserId,
+        deviceId,
+        runId,
+        actionId,
+        eventType: 'control.requested',
+        meta: getActionAuditMeta(action),
+      });
+
+      // Increment run action count if part of a run
+      if (runId) {
+        runStore.incrementActionCount(runId);
+        await persistRun(runId);
+      }
+
+      // Broadcast action update
+      sseBroadcast({ type: 'action_update', action: deviceAction });
+      
+      // Also broadcast run update (actionCount changed)
+      if (runId) {
+        const run = runStore.get(runId);
+        if (run) {
+          sseBroadcast({ type: 'run_update', run });
+        }
+      }
+      break;
+    }
+
+    // Iteration 7: Workspace Tools
+    case 'device.workspace.state': {
+      const { deviceId, workspaceState } = payload;
+      fastify.log.info({ deviceId, configured: workspaceState.configured, rootName: workspaceState.rootName }, 'Workspace state update received');
+
+      const device = deviceStore.setWorkspaceState(deviceId, workspaceState as WorkspaceState);
+      if (device) {
+        await devicesRepo.updateWorkspaceState(deviceId, workspaceState as WorkspaceState);
+        // Broadcast device update via SSE
+        sseBroadcast({ type: 'device_update', device: deviceStore.get(deviceId)! });
+      }
+      break;
+    }
+
+    case 'device.device_token.ack': {
+      fastify.log.info({ deviceId: payload.deviceId }, 'Device token acknowledged');
+      break;
+    }
+
+    // Iteration 8: Workspace Tools - with tool lifecycle
+    case 'device.tool.request': {
+      const { deviceId, runId, toolEventId, toolCallId, toolCall, at } = payload;
+      const state = socketToDevice.get(socket);
+      if (!enforceSocketRateLimit(
+        socket,
+        fastify,
+        state,
+        `device:${deviceId}:tool:ingest`,
+        config.TOOL_EVENTS_PER_10S,
+        10_000
+      )) {
+        return;
+      }
+
+      // Redact sensitive data for logging
+      const redacted = redactToolCallForLogs(toolCall as ToolCall);
+      fastify.log.info({ deviceId, runId, toolEventId, toolCallId, ...redacted }, 'Tool execution request received');
+
+      const summary: ToolSummary = {
+        toolEventId,
+        toolCallId,
+        runId,
+        deviceId,
+        tool: toolCall.tool as ToolSummary['tool'],
+        pathRel: redacted.pathRel,
+        cmd: redacted.cmd,
+        status: 'awaiting_user',
+        at,
+      };
+
+      const existing = toolStore.get(toolEventId);
+      const stored = existing
+        ? toolStore.update(toolEventId, summary) ?? summary
+        : toolStore.add(summary);
+      const toolOwnerUserId = ownership.getRunOwner(runId) ?? ownership.getDeviceOwner(deviceId) ?? undefined;
+      if (toolOwnerUserId) {
+        ownership.setToolOwner(stored.toolEventId, toolOwnerUserId);
+        await toolsRepo.save(stored, toolOwnerUserId);
+      }
+      await createSocketAuditEvent(state, {
+        userId: toolOwnerUserId,
+        deviceId,
+        runId,
+        toolName: toolCall.tool,
+        eventType: 'tool.requested',
+        meta: getToolAuditMeta(toolCall as ToolCall),
+      });
+
+      sseBroadcast({ type: 'tool_update', tool: stored });
+      break;
+    }
+
+    case 'device.tool.result': {
+      const { deviceId, runId, toolEventId, toolCallId, toolCall, result, at } = payload;
+      const state = socketToDevice.get(socket);
+      if (!enforceSocketRateLimit(
+        socket,
+        fastify,
+        state,
+        `device:${deviceId}:tool:ingest`,
+        config.TOOL_EVENTS_PER_10S,
+        10_000
+      )) {
+        return;
+      }
+
+      // Determine final status
+      const finalStatus: ToolEventStatus = result.ok ? 'executed' : 'failed';
+
+      const redacted = redactToolCallForLogs(toolCall as ToolCall);
+
+      // Build metadata from result (privacy-respecting)
+      const metadata: Partial<ToolSummary> = {};
+      if (result.exitCode !== undefined) metadata.exitCode = result.exitCode;
+      if (result.truncated !== undefined) metadata.truncated = result.truncated;
+      if (result.bytesWritten !== undefined) metadata.bytesWritten = result.bytesWritten;
+      if (result.hunksApplied !== undefined) metadata.hunksApplied = result.hunksApplied;
+      if (result.error?.code) metadata.errorCode = result.error.code;
+
+      // Try to find existing tool event, or fall back to toolCallId
+      let summary = toolStore.get(toolEventId) ?? toolStore.getByToolCallId(toolCallId);
+
+      if (summary) {
+        summary = toolStore.update(summary.toolEventId, {
+          status: finalStatus,
+          at,
+          tool: toolCall.tool as ToolSummary['tool'],
+          pathRel: redacted.pathRel,
+          cmd: redacted.cmd,
+          ...metadata,
+        }) ?? summary;
+      } else {
+        summary = {
+          toolEventId,
+          toolCallId,
+          runId,
+          deviceId,
+          tool: toolCall.tool as ToolSummary['tool'],
+          pathRel: redacted.pathRel,
+          cmd: redacted.cmd,
+          status: finalStatus,
+          at,
+          ...metadata,
+        };
+        toolStore.add(summary);
+      }
+      const toolOwnerUserId = ownership.getRunOwner(runId) ?? ownership.getDeviceOwner(deviceId) ?? undefined;
+      if (toolOwnerUserId) {
+        ownership.setToolOwner(summary.toolEventId, toolOwnerUserId);
+        await toolsRepo.save(summary, toolOwnerUserId);
+      }
+      await createSocketAuditEvent(state, {
+        userId: toolOwnerUserId,
+        deviceId,
+        runId,
+        toolName: toolCall.tool,
+        eventType: result.ok ? 'tool.executed' : 'tool.failed',
+        meta: getToolAuditMeta(toolCall as ToolCall, {
+          ok: result.ok,
+          exitCode: result.exitCode,
+          error: result.error,
+        }),
+      });
+
+      fastify.log.info({ 
+        deviceId, 
+        runId, 
+        toolEventId,
+        toolCallId,
+        ...redacted,
+        status: finalStatus,
+        ...metadata,
+      }, 'Tool execution result received');
+
+      // Broadcast tool update via SSE
+      sseBroadcast({ type: 'tool_update', tool: summary });
       break;
     }
 
@@ -496,6 +1063,13 @@ function handleDeviceMessage(
       fastify.log.warn({ type }, 'Unhandled device message type');
     }
   }
+}
+
+async function persistRun(runId: string): Promise<void> {
+  const run = runStore.get(runId);
+  const ownerUserId = ownership.getRunOwner(runId);
+  if (!run || !ownerUserId) return;
+  await runsRepo.save(run, ownerUserId);
 }
 
 // Helper to send message to a specific device
@@ -521,7 +1095,13 @@ export function getDeviceSocket(deviceId: string): WebSocket | undefined {
 
 // Get all connected device IDs
 export function getConnectedDeviceIds(): string[] {
-  return Array.from(socketToDevice.values()).map((s) => s.deviceId);
+  return Array.from(socketToDevice.values())
+    .filter((s) => s.helloReceived)
+    .map((s) => s.deviceId);
+}
+
+export function getWsConnectionsCount(): number {
+  return socketToDevice.size;
 }
 
 // SSE Broadcast functionality

@@ -1,4 +1,4 @@
-import type { Device, Platform, ScreenStreamState, ControlState } from '@ai-operator/shared';
+import type { Device, Platform, ScreenStreamState, ControlState, WorkspaceState } from '@ai-operator/shared';
 
 // In-memory device store
 const devices = new Map<string, Device>();
@@ -11,6 +11,13 @@ export interface DeviceInput {
 }
 
 export const deviceStore = {
+  load(devicesToLoad: Device[]): void {
+    devices.clear();
+    for (const device of devicesToLoad) {
+      devices.set(device.deviceId, device);
+    }
+  },
+
   get(deviceId: string): Device | undefined {
     return devices.get(deviceId);
   },
@@ -115,6 +122,20 @@ export const deviceStore = {
 
   getControlState(deviceId: string): ControlState | undefined {
     return devices.get(deviceId)?.controlState;
+  },
+
+  // Iteration 7: workspace state
+  setWorkspaceState(deviceId: string, state: WorkspaceState): Device | undefined {
+    const device = devices.get(deviceId);
+    if (!device) return undefined;
+
+    device.workspaceState = state;
+    device.lastSeenAt = Date.now();
+    return device;
+  },
+
+  getWorkspaceState(deviceId: string): WorkspaceState | undefined {
+    return devices.get(deviceId)?.workspaceState;
   },
 
   // Cleanup expired pairing codes (call periodically)

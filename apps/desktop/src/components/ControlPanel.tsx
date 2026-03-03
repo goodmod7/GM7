@@ -1,4 +1,3 @@
-import { useState, useCallback } from 'react';
 import type { WsClient } from '../lib/wsClient.js';
 
 interface ControlPanelProps {
@@ -9,37 +8,9 @@ interface ControlPanelProps {
 }
 
 export function ControlPanel({ wsClient, deviceId, enabled, onToggle }: ControlPanelProps) {
-  const [isLoading, setIsLoading] = useState(false);
-  
   // Log deviceId for debugging (marks it as used)
   console.debug('ControlPanel for device:', deviceId);
-
-  const handleToggle = useCallback(() => {
-    setIsLoading(true);
-    const newEnabled = !enabled;
-    
-    // Send to server
-    const sent = wsClient.sendControlState(newEnabled, 'local_user');
-    
-    if (sent) {
-      onToggle(newEnabled);
-    }
-    
-    setIsLoading(false);
-  }, [wsClient, enabled, onToggle]);
-
-  const handleStop = useCallback(() => {
-    if (!enabled) return;
-    
-    setIsLoading(true);
-    const sent = wsClient.sendControlState(false, 'local_user');
-    
-    if (sent) {
-      onToggle(false);
-    }
-    
-    setIsLoading(false);
-  }, [wsClient, enabled, onToggle]);
+  void wsClient;
 
   return (
     <div
@@ -64,8 +35,7 @@ export function ControlPanel({ wsClient, deviceId, enabled, onToggle }: ControlP
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           {enabled && (
             <button
-              onClick={handleStop}
-              disabled={isLoading}
+              onClick={() => onToggle(false)}
               style={{
                 padding: '0.5rem 1rem',
                 backgroundColor: '#ef4444',
@@ -80,8 +50,7 @@ export function ControlPanel({ wsClient, deviceId, enabled, onToggle }: ControlP
             </button>
           )}
           <button
-            onClick={handleToggle}
-            disabled={isLoading}
+            onClick={() => onToggle(!enabled)}
             style={{
               padding: '0.5rem 1rem',
               backgroundColor: enabled ? '#6b7280' : '#10b981',

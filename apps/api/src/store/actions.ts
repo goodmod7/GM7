@@ -14,7 +14,14 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_STORED_ACTIONS = 1000;
 
 export const actionStore = {
-  createAction(deviceId: string, action: InputAction): DeviceAction {
+  load(actionsToLoad: DeviceAction[]): void {
+    actions.clear();
+    for (const action of actionsToLoad) {
+      actions.set(action.actionId, action);
+    }
+  },
+
+  createAction(deviceId: string, action: InputAction, source: 'web' | 'agent' = 'web', runId?: string): DeviceAction {
     const now = Date.now();
     const deviceAction: DeviceAction = {
       actionId: crypto.randomUUID(),
@@ -23,6 +30,8 @@ export const actionStore = {
       status: 'requested' as ActionStatus,
       createdAt: now,
       updatedAt: now,
+      source,
+      runId,
     };
 
     // Clean up if too many actions
@@ -34,6 +43,34 @@ export const actionStore = {
     return deviceAction;
   },
 
+  // Iteration 6: Create action from device (already approved locally)
+  createActionFromDevice(
+    actionId: string,
+    deviceId: string,
+    action: InputAction,
+    source: 'web' | 'agent',
+    createdAt: number,
+    runId?: string
+  ): DeviceAction {
+    const deviceAction: DeviceAction = {
+      actionId,
+      deviceId,
+      action,
+      status: 'approved', // Already approved locally
+      createdAt,
+      updatedAt: Date.now(),
+      source,
+      runId,
+    };
+
+    if (actions.size >= MAX_STORED_ACTIONS) {
+      this.cleanup();
+    }
+
+    actions.set(actionId, deviceAction);
+    return deviceAction;
+  },
+
   get(actionId: string): DeviceAction | undefined {
     return actions.get(actionId);
   },
@@ -41,6 +78,13 @@ export const actionStore = {
   getByDevice(deviceId: string, limit: number = 50): DeviceAction[] {
     return Array.from(actions.values())
       .filter((a) => a.deviceId === deviceId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, limit);
+  },
+
+  getByRun(runId: string, limit: number = 50): DeviceAction[] {
+    return Array.from(actions.values())
+      .filter((a) => a.runId === runId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit);
   },

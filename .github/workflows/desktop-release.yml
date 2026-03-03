@@ -1,0 +1,147 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm -w install --frozen-lockfile
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          RAW_REF="${GITHUB_REF_NAME}"
+          if [[ "$RAW_REF" == v* ]]; then
+            VERSION="${RAW_REF#v}"
+          else
+            VERSION="$(node -p "require('./apps/desktop/package.json').version")"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build Windows bundle
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: pnpm --filter @ai-operator/desktop tauri build -- --bundles msi
+
+      - name: Normalize Windows asset names
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p release-assets
+          MSI_SOURCE="$(find apps/desktop/src-tauri/target/release/bundle/msi -type f -name '*.msi' | head -n 1)"
+          cp "$MSI_SOURCE" "release-assets/ai-operator-desktop_${VERSION}_windows_x86_64.msi"
+          if [[ -f "${MSI_SOURCE}.sig" ]]; then
+            cp "${MSI_SOURCE}.sig" "release-assets/ai-operator-desktop_${VERSION}_windows_x86_64.msi.sig"
+          fi
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-windows
+          path: release-assets/*
+
+      - name: Upload Windows assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86_64
+          - runner: macos-14
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm -w install --frozen-lockfile
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          RAW_REF="${GITHUB_REF_NAME}"
+          if [[ "$RAW_REF" == v* ]]; then
+            VERSION="${RAW_REF#v}"
+          else
+            VERSION="$(node -p "require('./apps/desktop/package.json').version")"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS bundle
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: pnpm --filter @ai-operator/desktop tauri build -- --bundles dmg
+
+      - name: Normalize macOS asset names
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p release-assets
+          DMG_SOURCE="$(find apps/desktop/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' | head -n 1)"
+          TARGET_NAME="release-assets/ai-operator-desktop_${VERSION}_macos_${{ matrix.arch }}.dmg"
+          cp "$DMG_SOURCE" "$TARGET_NAME"
+          if [[ -f "${DMG_SOURCE}.sig" ]]; then
+            cp "${DMG_SOURCE}.sig" "${TARGET_NAME}.sig"
+          fi
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-macos-${{ matrix.arch }}
+          path: release-assets/*
+
+      - name: Upload macOS assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*

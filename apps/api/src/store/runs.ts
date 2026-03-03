@@ -1,15 +1,17 @@
-import type { RunWithSteps, RunStep, StepStatus, ApprovalRequest, LogLine } from '@ai-operator/shared';
-import { RunStatus, ApprovalDecision } from '@ai-operator/shared';
+import type { RunWithSteps, RunStep, StepStatus, ApprovalRequest, LogLine, RunMode, RunConstraints, AgentProposal } from '@ai-operator/shared';
+import { RunStatus, ApprovalDecision, DEFAULT_RUN_CONSTRAINTS } from '@ai-operator/shared';
 
 // In-memory run store
 const runs = new Map<string, RunWithSteps>();
 
-// Track active run engines
+// Track active run engines (for manual mode)
 const activeEngines = new Map<string, RunEngine>();
 
 export interface RunInput {
   deviceId: string;
   goal: string;
+  mode?: RunMode;
+  constraints?: RunConstraints;
 }
 
 export interface CreateStepInput {
@@ -47,6 +49,14 @@ export function generateRunSteps(_goal: string): RunStep[] {
 }
 
 export const runStore = {
+  load(runsToLoad: RunWithSteps[]): void {
+    runs.clear();
+    for (const run of runsToLoad) {
+      runs.set(run.runId, run);
+    }
+    activeEngines.clear();
+  },
+
   get(runId: string): RunWithSteps | undefined {
     return runs.get(runId);
   },
@@ -70,6 +80,10 @@ export const runStore = {
       updatedAt: now,
       steps: generateRunSteps(input.goal),
       messages: [],
+      // Iteration 6: AI Assist fields
+      mode: input.mode || 'manual',
+      constraints: input.constraints || (input.mode === 'ai_assist' ? DEFAULT_RUN_CONSTRAINTS : undefined),
+      actionCount: 0,
     };
 
     runs.set(run.runId, run);
@@ -113,6 +127,24 @@ export const runStore = {
     // Keep only last 1000 logs per step
     if (step.logs.length > 1000) {
       step.logs = step.logs.slice(-1000);
+    }
+
+    run.updatedAt = Date.now();
+    return run;
+  },
+
+  // Iteration 6: Add log at run level (no specific step)
+  addRunLog(runId: string, log: LogLine): RunWithSteps | undefined {
+    const run = runs.get(runId);
+    if (!run) return undefined;
+
+    // Add to first step if exists, otherwise just update timestamp
+    if (run.steps.length > 0) {
+      const step = run.steps[0];
+      step.logs.push(log);
+      if (step.logs.length > 1000) {
+        step.logs = step.logs.slice(-1000);
+      }
     }
 
     run.updatedAt = Date.now();
@@ -175,7 +207,7 @@ export const runStore = {
     run.reason = reason;
     run.updatedAt = Date.now();
 
-    // Stop the engine if running
+    // Stop the engine if running (manual mode)
     const engine = activeEngines.get(runId);
     if (engine) {
       engine.stop();
@@ -185,7 +217,54 @@ export const runStore = {
     return run;
   },
 
-  // Engine management
+  // Iteration 6: AI Assist - update step from device
+  applyDeviceStepUpdate(runId: string, stepUpdate: RunStep): RunWithSteps | undefined {
+    const run = runs.get(runId);
+    if (!run) return undefined;
+       
+    // Only allow device updates in ai_assist mode
+    if (run.mode !== 'ai_assist') return undefined;
+
+    const step = run.steps.find((s) => s.stepId === stepUpdate.stepId);
+    if (!step) return undefined;
+
+    step.status = stepUpdate.status;
+    if (stepUpdate.startedAt) step.startedAt = stepUpdate.startedAt;
+    if (stepUpdate.endedAt) step.endedAt = stepUpdate.endedAt;
+    if (stepUpdate.logs) step.logs = stepUpdate.logs;
+
+    run.updatedAt = Date.now();
+    return run;
+  },
+
+  // Iteration 6: AI Assist - apply agent proposal
+  applyAgentProposal(runId: string, proposal: AgentProposal): RunWithSteps | undefined {
+    const run = runs.get(runId);
+    if (!run) return undefined;
+    
+    if (run.mode !== 'ai_assist') return undefined;
+
+    run.latestProposal = proposal;
+    run.lastAgentEventAt = Date.now();
+    run.updatedAt = Date.now();
+
+    return run;
+  },
+
+  // Iteration 6: AI Assist - increment action count
+  incrementActionCount(runId: string): RunWithSteps | undefined {
+    const run = runs.get(runId);
+    if (!run) return undefined;
+    
+    if (run.mode !== 'ai_assist') return undefined;
+
+    run.actionCount = (run.actionCount || 0) + 1;
+    run.updatedAt = Date.now();
+
+    return run;
+  },
+
+  // Engine management (for manual mode)
   setEngine(runId: string, engine: RunEngine): void {
     activeEngines.set(runId, engine);
   },

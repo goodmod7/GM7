@@ -1,7 +1,15 @@
-use serde::{Deserialize, Serialize};
-use tauri::Manager;
-use enigo::{Enigo, MouseControllable, KeyboardControllable, Key as EnigoKey, MouseButton as EnigoMouseButton};
 use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use tauri::{
+    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
+    tray::TrayIconBuilder,
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
+use enigo::{Enigo, MouseControllable, KeyboardControllable, Key as EnigoKey, MouseButton as EnigoMouseButton};
+
+mod llm;
+mod workspace;
 
 // Display info structure
 #[derive(Serialize)]
@@ -32,11 +40,6 @@ struct CaptureError {
 struct InputError {
     message: String,
     needs_permission: bool,
-}
-
-// Store Enigo instance
-struct InputState {
-    enigo: Enigo,
 }
 
 // List all available displays
@@ -253,6 +256,382 @@ fn input_hotkey(key: String, modifiers: Vec<String>) -> Result<(), InputError> {
     Ok(())
 }
 
+// ============================================================================
+// Iteration 6: AI Assist - Secure Key Storage
+// ============================================================================
+
+#[derive(Serialize)]
+struct KeyResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct TrayRuntimeState {
+    menu: Mutex<TrayMenuState>,
+}
+
+#[derive(Clone)]
+struct TrayMenuState {
+    window_visible: bool,
+    screen_preview_enabled: bool,
+    allow_control_enabled: bool,
+    ai_assist_active: bool,
+    ai_assist_paused: bool,
+    has_shown_tray_tip: bool,
+}
+
+impl Default for TrayMenuState {
+    fn default() -> Self {
+        Self {
+            window_visible: true,
+            screen_preview_enabled: false,
+            allow_control_enabled: false,
+            ai_assist_active: false,
+            ai_assist_paused: false,
+            has_shown_tray_tip: false,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrayStatePayload {
+    window_visible: bool,
+    screen_preview_enabled: bool,
+    allow_control_enabled: bool,
+    ai_assist_active: bool,
+    ai_assist_paused: bool,
+}
+
+fn device_token_account(device_id: &str) -> String {
+    format!("device_token::{}", device_id)
+}
+
+fn create_autolaunch() -> Result<auto_launch::AutoLaunch, String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to resolve current executable: {}", e))?;
+    let app_path = current_exe
+        .to_str()
+        .ok_or_else(|| "Executable path is not valid UTF-8".to_string())?;
+
+    auto_launch::AutoLaunchBuilder::new()
+        .set_app_name("AI Operator")
+        .set_app_path(app_path)
+        .build()
+        .map_err(|e| format!("Failed to configure auto-start: {}", e))
+}
+
+fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
+    let toggle_window = MenuItemBuilder::with_id(
+        "toggle_window",
+        if state.window_visible { "Hide App" } else { "Show App" },
+    )
+    .build(app)?;
+
+    let toggle_screen = MenuItemBuilder::with_id(
+        "toggle_screen_preview",
+        if state.screen_preview_enabled {
+            "Disable Screen Preview"
+        } else {
+            "Enable Screen Preview"
+        },
+    )
+    .build(app)?;
+
+    let toggle_control = MenuItemBuilder::with_id(
+        "toggle_allow_control",
+        if state.allow_control_enabled {
+            "Disable Allow Control"
+        } else {
+            "Enable Allow Control"
+        },
+    )
+    .build(app)?;
+
+    let ai_label = if !state.ai_assist_active {
+        "AI Assist Not Running"
+    } else if state.ai_assist_paused {
+        "Resume AI Assist"
+    } else {
+        "Pause AI Assist"
+    };
+
+    let toggle_ai = MenuItemBuilder::with_id("toggle_ai_pause", ai_label).build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+
+    MenuBuilder::new(app)
+        .items(&[
+            &toggle_window,
+            &toggle_screen,
+            &toggle_control,
+            &toggle_ai,
+            &separator,
+            &quit,
+        ])
+        .build()
+}
+
+fn refresh_tray_menu(app: &AppHandle, state: &TrayMenuState) -> Result<(), String> {
+    let tray = app
+        .tray_by_id("main-tray")
+        .ok_or_else(|| "Tray icon not initialized".to_string())?;
+    let menu = build_tray_menu(app, state).map_err(|e| format!("Failed to build tray menu: {}", e))?;
+    tray.set_menu(Some(menu))
+        .map_err(|e| format!("Failed to update tray menu: {}", e))?;
+    Ok(())
+}
+
+fn hide_window_to_tray(window: &tauri::WebviewWindow, runtime: &TrayRuntimeState) {
+    let _ = window.hide();
+    let _ = window.emit("tray.hide", ());
+
+    let mut guard = runtime.menu.lock().unwrap();
+    guard.window_visible = false;
+
+    if !guard.has_shown_tray_tip {
+        guard.has_shown_tray_tip = true;
+        let _ = window.emit("tray.tip", ());
+    }
+
+    let app = window.app_handle();
+    let _ = refresh_tray_menu(&app, &guard.clone());
+}
+
+#[tauri::command]
+fn tray_update_state(
+    app: AppHandle,
+    runtime: State<'_, TrayRuntimeState>,
+    window_visible: bool,
+    screen_preview_enabled: bool,
+    allow_control_enabled: bool,
+    ai_assist_active: bool,
+    ai_assist_paused: bool,
+) -> KeyResult {
+    let mut guard = runtime.menu.lock().unwrap();
+    guard.window_visible = window_visible;
+    guard.screen_preview_enabled = screen_preview_enabled;
+    guard.allow_control_enabled = allow_control_enabled;
+    guard.ai_assist_active = ai_assist_active;
+    guard.ai_assist_paused = ai_assist_paused;
+
+    match refresh_tray_menu(&app, &guard.clone()) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(e) => KeyResult { ok: false, error: Some(e) },
+    }
+}
+
+#[tauri::command]
+fn main_window_show(app: AppHandle, runtime: State<'_, TrayRuntimeState>) -> KeyResult {
+    let Some(window) = app.get_webview_window("main") else {
+        return KeyResult { ok: false, error: Some("Main window not found".to_string()) };
+    };
+
+    if let Err(e) = window.show() {
+        return KeyResult { ok: false, error: Some(format!("Failed to show window: {}", e)) };
+    }
+    let _ = window.set_focus();
+    let _ = window.emit("tray.show", ());
+
+    let mut guard = runtime.menu.lock().unwrap();
+    guard.window_visible = true;
+    let _ = refresh_tray_menu(&app, &guard.clone());
+
+    KeyResult { ok: true, error: None }
+}
+
+#[tauri::command]
+fn main_window_hide(app: AppHandle, runtime: State<'_, TrayRuntimeState>) -> KeyResult {
+    let Some(window) = app.get_webview_window("main") else {
+        return KeyResult { ok: false, error: Some("Main window not found".to_string()) };
+    };
+
+    hide_window_to_tray(&window, &runtime);
+    let mut guard = runtime.menu.lock().unwrap();
+    guard.window_visible = false;
+    let _ = refresh_tray_menu(&app, &guard.clone());
+
+    KeyResult { ok: true, error: None }
+}
+
+#[tauri::command]
+fn autostart_supported() -> bool {
+    cfg!(target_os = "macos") || cfg!(target_os = "windows")
+}
+
+#[tauri::command]
+fn autostart_is_enabled() -> Result<bool, String> {
+    if !autostart_supported() {
+        return Ok(false);
+    }
+
+    let auto = create_autolaunch()?;
+    auto.is_enabled()
+        .map_err(|e| format!("Failed to read auto-start state: {}", e))
+}
+
+#[tauri::command]
+fn autostart_set_enabled(enabled: bool) -> KeyResult {
+    if !autostart_supported() {
+        return KeyResult {
+            ok: false,
+            error: Some("Auto-start is not supported on this OS".to_string()),
+        };
+    }
+
+    match create_autolaunch() {
+        Ok(auto) => {
+            let result = if enabled {
+                auto.enable()
+            } else {
+                auto.disable()
+            };
+
+            match result {
+                Ok(()) => KeyResult { ok: true, error: None },
+                Err(e) => KeyResult {
+                    ok: false,
+                    error: Some(format!("Failed to update auto-start: {}", e)),
+                },
+            }
+        }
+        Err(e) => KeyResult { ok: false, error: Some(e) },
+    }
+}
+
+#[tauri::command]
+fn device_token_set(device_id: String, token: String) -> KeyResult {
+    let entry = keyring::Entry::new("ai-operator", &device_token_account(&device_id));
+    match entry.set_password(&token) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(e) => KeyResult {
+            ok: false,
+            error: Some(format!("Failed to store device token: {}", e)),
+        },
+    }
+}
+
+#[tauri::command]
+fn device_token_get(device_id: String) -> Option<String> {
+    let entry = keyring::Entry::new("ai-operator", &device_token_account(&device_id));
+    entry.get_password().ok()
+}
+
+#[tauri::command]
+fn device_token_clear(device_id: String) -> KeyResult {
+    let entry = keyring::Entry::new("ai-operator", &device_token_account(&device_id));
+    match entry.delete_password() {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(e) => KeyResult {
+            ok: false,
+            error: Some(format!("Failed to clear device token: {}", e)),
+        },
+    }
+}
+
+#[tauri::command]
+fn set_llm_api_key(provider: String, key: String) -> KeyResult {
+    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider));
+    match entry.set_password(&key) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(e) => KeyResult {
+            ok: false,
+            error: Some(format!("Failed to store key: {}", e)),
+        },
+    }
+}
+
+#[tauri::command]
+fn has_llm_api_key(provider: String) -> bool {
+    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider));
+    entry.get_password().is_ok()
+}
+
+#[tauri::command]
+fn clear_llm_api_key(provider: String) -> KeyResult {
+    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider));
+    match entry.delete_password() {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(e) => KeyResult {
+            ok: false,
+            error: Some(format!("Failed to clear key: {}", e)),
+        },
+    }
+}
+
+// ============================================================================
+// Iteration 6: AI Assist - LLM Proposal
+// ============================================================================
+
+#[derive(Deserialize)]
+struct ProposalRequest {
+    provider: String,
+    base_url: String,
+    model: String,
+    goal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_png_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<llm::ActionHistory>,
+    constraints: llm::RunConstraints,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_configured: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ProposalResult {
+    #[serde(flatten)]
+    proposal: llm::AgentProposal,
+}
+
+#[derive(Serialize)]
+struct ProposalError {
+    code: String,
+    message: String,
+}
+
+#[tauri::command]
+async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResult, ProposalError> {
+    // Retrieve API key from secure storage
+    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", params.provider));
+    let api_key = entry.get_password().map_err(|e| ProposalError {
+        code: "NO_API_KEY".to_string(),
+        message: format!("No API key configured: {}", e),
+    })?;
+
+    // Get workspace configuration status
+    let workspace_configured = params.workspace_configured.or_else(|| {
+        let guard = workspace::WORKSPACE_ROOT.lock().unwrap();
+        Some(guard.is_some())
+    });
+
+    let proposal_params = llm::ProposalParams {
+        provider: params.provider,
+        base_url: params.base_url,
+        model: params.model,
+        api_key,
+        goal: params.goal,
+        screenshot_png_base64: params.screenshot_png_base64,
+        history: params.history,
+        constraints: params.constraints,
+        workspace_configured,
+    };
+
+    let provider = llm::create_provider(&proposal_params.provider).map_err(|e| ProposalError {
+        code: e.code,
+        message: e.message,
+    })?;
+
+    let proposal = provider.propose_next_action(&proposal_params).await.map_err(|e| ProposalError {
+        code: e.code,
+        message: e.message,
+    })?;
+
+    Ok(ProposalResult { proposal })
+}
+
 // Resize RGBA image
 fn resize_rgba(rgba: &[u8], src_width: u32, src_height: u32, dst_width: u32, dst_height: u32) -> Vec<u8> {
     let mut result = vec![0u8; (dst_width * dst_height * 4) as usize];
@@ -330,7 +709,10 @@ mod base64 {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(TrayRuntimeState::default())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             list_displays, 
             capture_display_png,
@@ -339,14 +721,81 @@ pub fn run() {
             input_scroll,
             input_type,
             input_hotkey,
+            device_token_set,
+            device_token_get,
+            device_token_clear,
+            tray_update_state,
+            main_window_show,
+            main_window_hide,
+            autostart_supported,
+            autostart_is_enabled,
+            autostart_set_enabled,
+            // Iteration 6: AI Assist
+            set_llm_api_key,
+            has_llm_api_key,
+            clear_llm_api_key,
+            llm_propose_next_action,
+            // Iteration 7: Workspace Tools
+            workspace::workspace_configure,
+            workspace::workspace_get_state,
+            workspace::workspace_clear,
+            workspace::tool_execute,
         ])
         .setup(|app| {
+            let runtime = app.state::<TrayRuntimeState>();
+            let initial_state = runtime.menu.lock().unwrap().clone();
+            let tray_menu = build_tray_menu(&app.app_handle(), &initial_state)?;
+
+            TrayIconBuilder::with_id("main-tray")
+                .menu(&tray_menu)
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "toggle_window" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let runtime = app.state::<TrayRuntimeState>();
+                                let visible = window.is_visible().unwrap_or(true);
+                                if visible {
+                                    hide_window_to_tray(&window, &runtime);
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                    let _ = window.emit("tray.show", ());
+                                    let mut guard = runtime.menu.lock().unwrap();
+                                    guard.window_visible = true;
+                                    let _ = refresh_tray_menu(app, &guard.clone());
+                                }
+                            }
+                        }
+                        "toggle_screen_preview" => {
+                            let _ = app.emit("tray.toggle_screen_preview", ());
+                        }
+                        "toggle_allow_control" => {
+                            let _ = app.emit("tray.toggle_allow_control", ());
+                        }
+                        "toggle_ai_pause" => {
+                            let _ = app.emit("tray.toggle_ai_pause", ());
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
             #[cfg(debug_assertions)]
             {
                 let window = app.get_webview_window("main").unwrap();
                 window.open_devtools();
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let runtime = window.state::<TrayRuntimeState>();
+                hide_window_to_tray(window, &runtime);
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { usersRepo } from '../repos/users.js';
 import type { AuthUser } from './auth.js';
+import { config } from '../config.js';
 
 export async function getUserSubscriptionStatus(userId: string): Promise<'active' | 'inactive'> {
   const billing = await usersRepo.getBilling(userId);
@@ -12,6 +13,10 @@ export async function requireActiveSubscription(
   reply: FastifyReply,
   user: AuthUser
 ): Promise<boolean> {
+  if (!config.BILLING_ENABLED) {
+    return true;
+  }
+
   const status = await getUserSubscriptionStatus(user.id);
   if (status === 'active') {
     return true;

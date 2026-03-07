@@ -14,7 +14,7 @@ import { actionStore } from './store/actions.js';
 import { toolStore } from './store/tools.js';
 import { setRunPersistence, setSSEBroadcast } from './engine/runEngine.js';
 import { createServerMessage, redactActionForLog, DEFAULT_RUN_CONSTRAINTS } from '@ai-operator/shared';
-import type { InputAction, RunMode, ServerEventType } from '@ai-operator/shared';
+import type { Device, InputAction, RunMode, ServerEventType } from '@ai-operator/shared';
 import { prisma } from './db/prisma.js';
 import { actionsRepo } from './repos/actions.js';
 import { auditRepo } from './repos/audit.js';
@@ -23,14 +23,25 @@ import { runsRepo } from './repos/runs.js';
 import { sessionsRepo } from './repos/sessions.js';
 import { toolsRepo } from './repos/tools.js';
 import { usersRepo } from './repos/users.js';
+import { stripeEventsRepo } from './repos/stripe-events.js';
 import { ownership } from './lib/ownership.js';
 import { fetchDesktopRelease, getGitHubReleaseCacheStats } from './lib/releases/github.js';
 import { resolveDesktopAssets } from './lib/releases/resolveDesktopAssets.js';
 import { consumeRateLimit, getRateLimitKeyCount } from './lib/ratelimit.js';
 import { stripe, mapStripeSubscriptionStatus } from './lib/stripe.js';
 import { requireActiveSubscription } from './lib/subscription.js';
-import { getDeploymentStatus } from './lib/deployment.js';
 import { evaluateReadiness } from './lib/readiness.js';
+import { getAppVersion, getVersionDriftWarnings } from './lib/version.js';
+import { getPresence } from './lib/presence.js';
+import { recoverInProgressRunsOnStartup } from './lib/run-recovery.js';
+import {
+  counterLabelsFromRateLimitKey,
+  incCounter,
+  metricLabels,
+  observeDuration,
+  renderPrometheusMetrics,
+  setGauge,
+} from './lib/metrics.js';
 import {
   type AuthenticatedRequest,
   clearAuthCookies,
@@ -77,6 +88,9 @@ const fastify = Fastify({
   },
 });
 
+const appVersion = getAppVersion();
+const versionDriftWarnings = getVersionDriftWarnings();
+
 await fastify.register(cookie);
 await fastify.register(cors, {
   origin(origin, callback) {
@@ -105,6 +119,16 @@ await fastify.register(fastifyRawBody, {
 fastify.addHook('onRequest', async (request, reply) => {
   reply.header('x-request-id', request.id);
   (request as FastifyRequest & { startedAt?: bigint }).startedAt = process.hrtime.bigint();
+});
+
+fastify.addHook('onSend', async (_request, reply) => {
+  reply.header('x-content-type-options', 'nosniff');
+  reply.header('referrer-policy', 'no-referrer');
+  reply.header('x-frame-options', 'DENY');
+  reply.header('permissions-policy', 'accelerometer=(), camera=(), geolocation=(), microphone=(), payment=(), usb=()');
+  if (config.NODE_ENV === 'production') {
+    reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
+  }
 });
 
 fastify.addHook('preHandler', async (request, reply) => {
@@ -145,6 +169,19 @@ fastify.addHook('onResponse', async (request, reply) => {
     },
     'HTTP request completed'
   );
+
+  const route = request.routeOptions?.url ?? request.url.split('?')[0];
+  incCounter('http_requests_total', metricLabels({
+    method: request.method,
+    route,
+    status: reply.statusCode,
+  }));
+  if (durationMs !== undefined) {
+    observeDuration('http_request_duration_ms', durationMs, metricLabels({
+      method: request.method,
+      route,
+    }));
+  }
 });
 
 // SSE clients
@@ -154,6 +191,8 @@ interface SSEClient {
   reply: FastifyReply;
 }
 const sseClients = new Map<string, SSEClient>();
+setGauge('ws_connections_current', 0);
+setGauge('sse_clients_current', 0);
 
 interface RequestAuditContext {
   ip: string | null;
@@ -214,31 +253,47 @@ function build429Reply(reply: FastifyReply, retryAfterSeconds: number) {
 
 async function getReadinessReport() {
   return evaluateReadiness({
-    deployment: getDeploymentStatus(config.DEPLOYMENT_MODE),
+    billingEnabled: config.BILLING_ENABLED,
+    desktopReleaseSource: config.DESKTOP_RELEASE_SOURCE,
     stripe: {
       secretKeyConfigured: Boolean(config.STRIPE_SECRET_KEY),
       webhookSecretConfigured: Boolean(config.STRIPE_WEBHOOK_SECRET),
       priceIdConfigured: Boolean(config.STRIPE_PRICE_ID),
     },
-    desktopRelease: {
-      source: config.DESKTOP_RELEASE_SOURCE,
+    github: {
       repoConfigured: Boolean(config.GITHUB_REPO_OWNER && config.GITHUB_REPO_NAME),
-      assetUrlsConfigured: Boolean(
-        config.DESKTOP_WIN_URL && config.DESKTOP_MAC_INTEL_URL && config.DESKTOP_MAC_ARM_URL
-      ),
     },
     checkDatabase: async () => {
       await prisma.$queryRaw`SELECT 1`;
     },
+    checkSchema: async () => {
+      const requiredTables = ['User', 'Device', 'Run', 'Session', 'AuditEvent'];
+      const rows = await prisma.$queryRaw<Array<{ table_name: string }>>`
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name IN ('User', 'Device', 'Run', 'Session', 'AuditEvent')
+      `;
+      const found = new Set(rows.map((row) => row.table_name));
+      for (const table of requiredTables) {
+        if (!found.has(table)) {
+          throw new Error(`Missing table ${table}`);
+        }
+      }
+    },
   });
 }
 
-function enforceHttpRateLimit(reply: FastifyReply, key: string, limit: number, windowMs: number): boolean {
-  const result = consumeRateLimit(key, limit, windowMs);
+async function enforceHttpRateLimit(reply: FastifyReply, key: string, limit: number, windowMs: number): Promise<boolean> {
+  const result = await consumeRateLimit(key, limit, windowMs, {
+    backend: config.RATE_LIMIT_BACKEND,
+    redisUrl: config.REDIS_URL,
+  });
   if (result.allowed) {
     return true;
   }
 
+  incCounter('rate_limit_hits_total', counterLabelsFromRateLimitKey(key));
   void reply.send(build429Reply(reply, result.retryAfterSeconds));
   return false;
 }
@@ -464,8 +519,26 @@ async function getDesktopUpdateManifest(platform: string, arch: string, currentV
   };
 }
 
-function getOwnedDevices(userId: string) {
-  return deviceStore.getAll().filter((device) => ownership.getDeviceOwner(device.deviceId) === userId);
+async function getOwnedDevices(userId: string) {
+  const owned = deviceStore.getAll().filter((device) => ownership.getDeviceOwner(device.deviceId) === userId);
+  return Promise.all(owned.map((device) => withPresenceState(device)));
+}
+
+async function withPresenceState(device: Device) {
+  const now = Date.now();
+  const connectionThresholdMs = 45_000;
+  const presence = await getPresence(config.RATE_LIMIT_BACKEND, config.REDIS_URL, device.deviceId);
+  if (presence) {
+    return {
+      ...device,
+      connected: presence.connected,
+      lastSeenAt: Math.max(device.lastSeenAt, presence.lastSeenAt),
+    };
+  }
+  return {
+    ...device,
+    connected: now - device.lastSeenAt < connectionThresholdMs,
+  };
 }
 
 function eventBelongsToUser(event: ServerEventType, userId: string): boolean {
@@ -561,34 +634,43 @@ for (const persisted of persistedTools) {
   ownership.setToolOwner(persisted.tool.toolEventId, persisted.ownerUserId);
 }
 
+const recoveredRuns = await recoverInProgressRunsOnStartup(config.RUN_RECOVERY_POLICY, {
+  listInProgressRuns: () => runsRepo.listInProgressRuns(),
+  persistRun: (run, ownerUserId) => runsRepo.save(run, ownerUserId),
+  createAuditEvent: async ({ userId, deviceId, runId, eventType, meta }) => {
+    await createAuditEvent(null, { userId, deviceId, runId, eventType, meta });
+  },
+});
+if (recoveredRuns > 0) {
+  fastify.log.warn({ recoveredRuns, policy: config.RUN_RECOVERY_POLICY }, 'Recovered in-progress runs after restart');
+}
+
 // ============================================================================
 // Health Check
 // ============================================================================
 
-fastify.get('/health', async (_request, reply) => {
+fastify.get('/health', async () => {
+  return {
+    ok: true,
+    version: appVersion,
+    uptimeSeconds: Math.floor(process.uptime()),
+    ts: Date.now(),
+  };
+});
+
+fastify.get('/ready', async (_request, reply) => {
   const readiness = await getReadinessReport();
   if (!readiness.ok) {
+    incCounter('readiness_failures_total');
     reply.status(503);
   }
 
   return {
     ok: readiness.ok,
-    live: true,
-    timestamp: Date.now(),
-    version: '0.0.6',
-    deployment: readiness.deployment,
-    readiness: {
-      ok: readiness.ok,
-      database: readiness.database,
-      stripe: {
-        configured: readiness.stripe.configured,
-      },
-      desktopRelease: {
-        source: readiness.desktopRelease.source,
-        configured: readiness.desktopRelease.configured,
-      },
-      failures: readiness.failures,
-    },
+    checks: readiness.checks,
+    version: appVersion,
+    ts: Date.now(),
+    failures: readiness.failures,
   };
 });
 
@@ -607,7 +689,6 @@ fastify.get('/admin/health', async (request, reply) => {
   return {
     ok: readiness.ok,
     live: true,
-    deployment: readiness.deployment,
     readiness,
     wsConnectionsCount: getWsConnectionsCount(),
     sseClientsCount: sseClients.size,
@@ -618,12 +699,25 @@ fastify.get('/admin/health', async (request, reply) => {
   };
 });
 
+fastify.get('/metrics', async (request, reply) => {
+  const adminKey = getHeaderValue(request.headers['x-admin-api-key']);
+  const allowPublicMetrics = config.METRICS_PUBLIC;
+  const authorized = allowPublicMetrics || (Boolean(config.ADMIN_API_KEY) && adminKey === config.ADMIN_API_KEY);
+  if (!authorized) {
+    reply.status(401);
+    return { error: 'Unauthorized' };
+  }
+
+  reply.header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  return reply.send(renderPrometheusMetrics());
+});
+
 // ============================================================================
 // Auth Endpoints
 // ============================================================================
 
 fastify.post('/auth/register', async (request, reply) => {
-  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:auth:register`, config.AUTH_LOGIN_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `ip:${request.ip}:auth:register`, config.AUTH_LOGIN_PER_MIN, 60_000))) {
     return;
   }
 
@@ -650,7 +744,7 @@ fastify.post('/auth/register', async (request, reply) => {
 });
 
 fastify.post('/auth/login', async (request, reply) => {
-  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:auth:login`, config.AUTH_LOGIN_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `ip:${request.ip}:auth:login`, config.AUTH_LOGIN_PER_MIN, 60_000))) {
     return;
   }
 
@@ -683,7 +777,7 @@ fastify.post('/auth/login', async (request, reply) => {
 });
 
 fastify.post('/auth/refresh', async (request, reply) => {
-  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:auth:refresh`, config.AUTH_REFRESH_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `ip:${request.ip}:auth:refresh`, config.AUTH_REFRESH_PER_MIN, 60_000))) {
     return;
   }
 
@@ -853,7 +947,7 @@ fastify.post('/billing/checkout', async (request, reply) => {
   if (!user) {
     return { error: 'Unauthorized' };
   }
-  if (!enforceHttpRateLimit(reply, `user:${user.id}:billing`, config.BILLING_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `user:${user.id}:billing`, config.BILLING_PER_MIN, 60_000))) {
     return;
   }
 
@@ -902,7 +996,7 @@ fastify.post('/billing/portal', async (request, reply) => {
   if (!user) {
     return { error: 'Unauthorized' };
   }
-  if (!enforceHttpRateLimit(reply, `user:${user.id}:billing`, config.BILLING_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `user:${user.id}:billing`, config.BILLING_PER_MIN, 60_000))) {
     return;
   }
 
@@ -926,7 +1020,7 @@ fastify.post('/billing/portal', async (request, reply) => {
 });
 
 fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, reply) => {
-  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:billing:webhook`, config.BILLING_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `ip:${request.ip}:billing:webhook`, config.BILLING_PER_MIN, 60_000))) {
     return;
   }
 
@@ -934,6 +1028,7 @@ fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, 
   const rawBody = (request as typeof request & { rawBody?: Buffer }).rawBody;
 
   if (!signature || Array.isArray(signature) || !rawBody) {
+    incCounter('stripe_webhook_failures_total', metricLabels({ reason: 'invalid_request' }));
     reply.status(400);
     return { error: 'Invalid webhook request' };
   }
@@ -942,6 +1037,7 @@ fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, 
   try {
     event = stripe.webhooks.constructEvent(rawBody, signature, config.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
+    incCounter('stripe_webhook_failures_total', metricLabels({ reason: 'invalid_signature' }));
     fastify.log.warn({ err }, 'Stripe webhook signature verification failed');
     reply.status(400);
     return { error: 'Invalid signature' };
@@ -949,35 +1045,57 @@ fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, 
 
   fastify.log.info({ eventId: event.id, eventType: event.type }, 'Stripe webhook received');
 
-  switch (event.type) {
-    case 'customer.subscription.created':
-    case 'customer.subscription.updated':
-    case 'customer.subscription.deleted': {
-      const subscription = event.data.object as any;
-      const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
-      if (customerId) {
-        await usersRepo.updateSubscriptionByStripeCustomerId(
-          customerId,
-          getSubscriptionFields(subscription)
-        );
-      }
-      break;
-    }
+  if (await stripeEventsRepo.exists(event.id)) {
+    fastify.log.info({ eventId: event.id, eventType: event.type }, 'Stripe webhook duplicate ignored');
+    return { received: true, duplicate: true };
+  }
 
-    case 'checkout.session.completed': {
-      const session = event.data.object as any;
-      const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
-      if (customerId && typeof session.subscription === 'string') {
-        await usersRepo.updateSubscriptionByStripeCustomerId(customerId, {
-          subscriptionStatus: 'active',
-          subscriptionId: session.subscription,
-        });
-      }
-      break;
-    }
+  try {
+    await stripeEventsRepo.create(event.id, event.type);
+  } catch {
+    fastify.log.info({ eventId: event.id, eventType: event.type }, 'Stripe webhook duplicate race ignored');
+    return { received: true, duplicate: true };
+  }
 
-    default:
-      break;
+  try {
+    switch (event.type) {
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object as any;
+        const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
+        if (customerId) {
+          await usersRepo.updateSubscriptionByStripeCustomerId(
+            customerId,
+            getSubscriptionFields(subscription)
+          );
+        }
+        break;
+      }
+
+      case 'checkout.session.completed': {
+        const session = event.data.object as any;
+        const customerId = typeof session.customer === 'string' ? session.customer : session.customer?.id;
+        if (customerId && typeof session.subscription === 'string') {
+          await usersRepo.updateSubscriptionByStripeCustomerId(customerId, {
+            subscriptionStatus: 'active',
+            subscriptionId: session.subscription,
+          });
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  } catch (err) {
+    incCounter('stripe_webhook_failures_total', metricLabels({ reason: 'processing_error' }));
+    fastify.log.error(
+      { eventId: event.id, eventType: event.type, err: err instanceof Error ? err.message : String(err) },
+      'Stripe webhook processing failed'
+    );
+    reply.status(500);
+    return { error: 'Webhook processing failed' };
   }
 
   return { received: true };
@@ -994,7 +1112,7 @@ fastify.get('/devices', async (request, reply) => {
   }
 
   return {
-    devices: getOwnedDevices(user.id),
+    devices: await getOwnedDevices(user.id),
   };
 });
 
@@ -1012,7 +1130,7 @@ fastify.get('/devices/:deviceId', async (request, reply) => {
     return { error: 'Device not found' };
   }
 
-  return { device };
+  return { device: await withPresenceState(device) };
 });
 
 fastify.post('/devices/:deviceId/pair', async (request, reply) => {
@@ -1158,7 +1276,7 @@ fastify.post('/devices/:deviceId/actions', async (request, reply) => {
 
   const { deviceId } = request.params as { deviceId: string };
   const { action } = request.body as { action: InputAction };
-  if (!enforceHttpRateLimit(reply, `device:${deviceId}:control:request`, config.CONTROL_ACTIONS_PER_10S, 10_000)) {
+  if (!(await enforceHttpRateLimit(reply, `device:${deviceId}:control:request`, config.CONTROL_ACTIONS_PER_10S, 10_000))) {
     return;
   }
 
@@ -1278,7 +1396,7 @@ fastify.post('/runs', async (request, reply) => {
   if (!user) {
     return { error: 'Unauthorized' };
   }
-  if (!enforceHttpRateLimit(reply, `user:${user.id}:runs:create`, config.RUNS_CREATE_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `user:${user.id}:runs:create`, config.RUNS_CREATE_PER_MIN, 60_000))) {
     return;
   }
 
@@ -1478,7 +1596,7 @@ fastify.get('/devices/:deviceId/tools', async (request, reply) => {
 // ============================================================================
 
 fastify.get('/events', async (request, reply) => {
-  if (!enforceHttpRateLimit(reply, `ip:${request.ip}:sse`, config.SSE_CONNECT_PER_MIN, 60_000)) {
+  if (!(await enforceHttpRateLimit(reply, `ip:${request.ip}:sse`, config.SSE_CONNECT_PER_MIN, 60_000))) {
     return;
   }
 
@@ -1498,6 +1616,7 @@ fastify.get('/events', async (request, reply) => {
 
   const clientId = randomUUID();
   sseClients.set(clientId, { id: clientId, userId: user.id, reply });
+  setGauge('sse_clients_current', sseClients.size);
 
   fastify.log.info({ clientId, count: sseClients.size, requestId: request.id }, 'SSE client connected');
 
@@ -1507,6 +1626,7 @@ fastify.get('/events', async (request, reply) => {
   // Handle client disconnect
   request.raw.on('close', () => {
     sseClients.delete(clientId);
+    setGauge('sse_clients_current', sseClients.size);
     fastify.log.info({ clientId, count: sseClients.size, requestId: request.id }, 'SSE client disconnected');
   });
 
@@ -1517,6 +1637,7 @@ fastify.get('/events', async (request, reply) => {
     } catch {
       clearInterval(keepAlive);
       sseClients.delete(clientId);
+      setGauge('sse_clients_current', sseClients.size);
     }
   }, 30000);
 
@@ -1535,6 +1656,9 @@ setupWebSocket(fastify);
 // ============================================================================
 
 try {
+  for (const warning of versionDriftWarnings) {
+    fastify.log.warn({ warning }, 'Version drift detected');
+  }
   await fastify.listen({ port: config.PORT, host: '0.0.0.0' });
   fastify.log.info(`API server listening on port ${config.PORT}`);
 } catch (err) {

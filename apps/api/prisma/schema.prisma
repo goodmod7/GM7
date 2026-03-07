@@ -174,3 +174,10 @@ model AuditEvent {
   @@index([eventType])
   @@index([createdAt])
 }
+
+model StripeEvent {
+  id            String   @id @default(cuid())
+  stripeEventId String   @unique
+  type          String
+  createdAt     DateTime @default(now())
+}

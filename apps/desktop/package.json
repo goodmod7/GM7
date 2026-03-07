@@ -1,6 +1,6 @@
 {
   "name": "@ai-operator/desktop",
-  "version": "0.0.4",
+  "version": "0.0.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,8 @@
     "check:rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "tauri:check": "pnpm run check:rust:fmt && pnpm run check:rust:clippy && pnpm run tauri:build:debug",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "check:csp": "node ../../scripts/check-desktop-csp.mjs"
   },
   "dependencies": {
     "@ai-operator/shared": "workspace:*",

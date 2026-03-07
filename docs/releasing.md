@@ -26,16 +26,39 @@ git push --tags
 
 You can also run the `Desktop Release` workflow manually with `workflow_dispatch`. On non-tag runs it builds normalized artifacts and uploads them as workflow artifacts, but it does not attach them to a GitHub Release.
 
+The workflow supports `release_mode`:
+
+- `unsigned` (default): builds artifacts without enforcing signing secrets.
+- `signed`: requires updater signing secrets before build.
+
+For safety, tags prefixed with `prod-` always force `signed` mode.
+
 For normal development safety gates, `.github/workflows/desktop-ci.yml` runs on pull requests and pushes to `main`. It compiles the desktop app on macOS and Windows, while `.github/workflows/desktop-release.yml` remains the tag-driven publishing workflow.
 
 ## GitHub Secrets
 
-For updater signature generation, configure:
+For signed release mode and updater signature generation, configure:
 
 - `TAURI_PRIVATE_KEY`
 - `TAURI_KEY_PASSWORD`
 
-Optional signing and notarization remain future work. The current workflow is designed to keep building installers even if platform signing secrets are not configured.
+If you run with `release_mode=signed` and these are missing, the workflow fails fast.
+
+If you run with `release_mode=unsigned`, artifacts are still produced and release notes include `Release mode: UNSIGNED`.
+
+### Signing/Notarization TODO Gates
+
+These are still explicit TODOs and must be configured before treating desktop artifacts as production-trusted installers:
+
+- Windows Authenticode signing certificate and secure signing step in workflow.
+- macOS code signing identity (Developer ID Application) in workflow.
+- macOS notarization credentials (Apple API key / notary profile) and notarization submit/staple steps.
+- Verification step that fails production release if platform trust-chain checks are missing.
+
+Current guardrail:
+
+- `prod-*` tags force signed updater artifacts and fail if required updater key secrets are absent.
+- They do not yet guarantee full OS trust chain (Authenticode + notarization) until TODOs above are implemented.
 
 ## API Configuration
 

@@ -276,7 +276,7 @@ function App() {
         deviceId: id,
         deviceName: `Desktop-${id.slice(0, 8)}`,
         platform: detectPlatform(),
-        appVersion: '0.0.5',
+        appVersion: '0.0.6',
         deviceToken,
         onStatusChange: (newStatus) => {
           console.log('[App] Connection status:', newStatus);

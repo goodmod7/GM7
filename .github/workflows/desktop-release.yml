@@ -4,7 +4,17 @@ on:
   push:
     tags:
       - 'v*'
+      - 'prod-*'
   workflow_dispatch:
+    inputs:
+      release_mode:
+        description: 'Release mode for signing enforcement'
+        required: true
+        default: unsigned
+        type: choice
+        options:
+          - unsigned
+          - signed
 
 jobs:
   build-windows:
@@ -37,16 +47,49 @@ jobs:
           RAW_REF="${GITHUB_REF_NAME}"
           if [[ "$RAW_REF" == v* ]]; then
             VERSION="${RAW_REF#v}"
+          elif [[ "$RAW_REF" == prod-* ]]; then
+            VERSION="${RAW_REF#prod-}"
           else
             VERSION="$(node -p "require('./apps/desktop/package.json').version")"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build Windows bundle
+      - name: Resolve release mode + signing requirements
+        id: release_mode
+        shell: bash
+        env:
+          INPUT_RELEASE_MODE: ${{ github.event.inputs.release_mode }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: |
+          MODE="${INPUT_RELEASE_MODE:-unsigned}"
+          if [[ "${GITHUB_REF_NAME}" == prod-* ]]; then
+            MODE="signed"
+          fi
+
+          if [[ "$MODE" == "signed" ]]; then
+            if [[ -z "$TAURI_PRIVATE_KEY" || -z "$TAURI_KEY_PASSWORD" ]]; then
+              echo "Signed mode requires TAURI_PRIVATE_KEY and TAURI_KEY_PASSWORD" >&2
+              exit 1
+            fi
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "label=SIGNED" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "label=UNSIGNED" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Windows bundle (signed)
+        if: steps.release_mode.outputs.signed == 'true'
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: pnpm --filter @ai-operator/desktop tauri build -- --bundles msi
+
+      - name: Build Windows bundle (unsigned)
+        if: steps.release_mode.outputs.signed != 'true'
+        shell: bash
         run: pnpm --filter @ai-operator/desktop tauri build -- --bundles msi
 
       - name: Normalize Windows asset names
@@ -67,10 +110,12 @@ jobs:
           path: release-assets/*
 
       - name: Upload Windows assets to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
+          body: |
+            Release mode: ${{ steps.release_mode.outputs.label }}
 
   build-macos:
     strategy:
@@ -110,16 +155,49 @@ jobs:
           RAW_REF="${GITHUB_REF_NAME}"
           if [[ "$RAW_REF" == v* ]]; then
             VERSION="${RAW_REF#v}"
+          elif [[ "$RAW_REF" == prod-* ]]; then
+            VERSION="${RAW_REF#prod-}"
           else
             VERSION="$(node -p "require('./apps/desktop/package.json').version")"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build macOS bundle
+      - name: Resolve release mode + signing requirements
+        id: release_mode
+        shell: bash
+        env:
+          INPUT_RELEASE_MODE: ${{ github.event.inputs.release_mode }}
+          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: |
+          MODE="${INPUT_RELEASE_MODE:-unsigned}"
+          if [[ "${GITHUB_REF_NAME}" == prod-* ]]; then
+            MODE="signed"
+          fi
+
+          if [[ "$MODE" == "signed" ]]; then
+            if [[ -z "$TAURI_PRIVATE_KEY" || -z "$TAURI_KEY_PASSWORD" ]]; then
+              echo "Signed mode requires TAURI_PRIVATE_KEY and TAURI_KEY_PASSWORD" >&2
+              exit 1
+            fi
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "label=SIGNED" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "label=UNSIGNED" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build macOS bundle (signed)
+        if: steps.release_mode.outputs.signed == 'true'
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+        run: pnpm --filter @ai-operator/desktop tauri build -- --bundles dmg
+
+      - name: Build macOS bundle (unsigned)
+        if: steps.release_mode.outputs.signed != 'true'
+        shell: bash
         run: pnpm --filter @ai-operator/desktop tauri build -- --bundles dmg
 
       - name: Normalize macOS asset names
@@ -141,7 +219,9 @@ jobs:
           path: release-assets/*
 
       - name: Upload macOS assets to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
+          body: |
+            Release mode: ${{ steps.release_mode.outputs.label }}

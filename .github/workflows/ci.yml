@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-typecheck-lint:
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm -w install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -w typecheck
+
+      - name: Build
+        run: pnpm -w build
+
+      - name: Lint Gate
+        run: pnpm -w lint:ci
+
+      - name: Test
+        run: pnpm -w test
+
+      - name: Version Check
+        run: pnpm version:check
+
+  smoke-e2e:
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+      DATABASE_URL_VALUE: postgresql://postgres:postgres@127.0.0.1:5432/ai_operator_test
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ai_operator_test
+      SMOKE_MANAGE_INFRA: "0"
+      SMOKE_START_WEB: "0"
+      SMOKE_MIGRATE_DEPLOY: "1"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ai_operator_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ai_operator_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm -w install --frozen-lockfile
+
+      - name: Wait for Postgres
+        run: |
+          for i in {1..30}; do
+            if (echo > /dev/tcp/127.0.0.1/5432) >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Postgres did not become ready in time" >&2
+          exit 1
+
+      - name: Run HTTP smoke
+        run: bash scripts/smoke/httpSmoke.sh
+
+      - name: Run WS smoke
+        run: bash scripts/smoke/wsSmoke.sh

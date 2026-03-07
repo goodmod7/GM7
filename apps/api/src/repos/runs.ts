@@ -122,4 +122,17 @@ export const runsRepo = {
     });
     return row ? mapRun(row) : null;
   },
+
+  async listInProgressRuns() {
+    const rows = await prisma.run.findMany({
+      where: { status: { in: ['running', 'waiting_for_user'] } },
+      include: { steps: { orderBy: { stepId: 'asc' } } },
+      orderBy: { updatedAt: 'asc' },
+    });
+
+    return rows.map((row) => ({
+      run: mapRun(row),
+      ownerUserId: row.ownerUserId,
+    }));
+  },
 };

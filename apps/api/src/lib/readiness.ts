@@ -1,96 +1,72 @@
-import type { DeploymentStatus } from './deployment.js';
-
-export interface StripeReadinessInput {
-  secretKeyConfigured: boolean;
-  webhookSecretConfigured: boolean;
-  priceIdConfigured: boolean;
-}
-
-export interface DesktopReleaseReadinessInput {
-  source: 'file' | 'github';
-  repoConfigured: boolean;
-  assetUrlsConfigured: boolean;
+export interface ReadyChecks {
+  db: boolean;
+  schema: boolean;
+  stripe: boolean;
+  github: boolean;
 }
 
 export interface ReadinessInput {
-  deployment: DeploymentStatus;
-  stripe: StripeReadinessInput;
-  desktopRelease: DesktopReleaseReadinessInput;
-  checkDatabase: () => Promise<void>;
-}
-
-export interface ReadinessReport {
-  ok: boolean;
-  database: { ok: boolean };
-  deployment: DeploymentStatus;
+  billingEnabled: boolean;
+  desktopReleaseSource: 'file' | 'github';
   stripe: {
-    configured: boolean;
     secretKeyConfigured: boolean;
     webhookSecretConfigured: boolean;
     priceIdConfigured: boolean;
   };
-  desktopRelease: {
-    source: 'file' | 'github';
-    configured: boolean;
+  github: {
     repoConfigured: boolean;
-    assetUrlsConfigured: boolean;
   };
+  checkDatabase: () => Promise<void>;
+  checkSchema: () => Promise<void>;
+}
+
+export interface ReadinessReport {
+  ok: boolean;
+  checks: ReadyChecks;
   failures: string[];
-}
-
-export function getStripeReadiness(input: StripeReadinessInput): ReadinessReport['stripe'] {
-  const configured = input.secretKeyConfigured && input.webhookSecretConfigured && input.priceIdConfigured;
-  return {
-    configured,
-    secretKeyConfigured: input.secretKeyConfigured,
-    webhookSecretConfigured: input.webhookSecretConfigured,
-    priceIdConfigured: input.priceIdConfigured,
-  };
-}
-
-export function getDesktopReleaseReadiness(
-  input: DesktopReleaseReadinessInput
-): ReadinessReport['desktopRelease'] {
-  const configured = input.source === 'github' ? input.repoConfigured : input.assetUrlsConfigured;
-  return {
-    source: input.source,
-    configured,
-    repoConfigured: input.repoConfigured,
-    assetUrlsConfigured: input.assetUrlsConfigured,
-  };
 }
 
 export async function evaluateReadiness(input: ReadinessInput): Promise<ReadinessReport> {
   const failures: string[] = [];
-  let databaseOk = true;
+  const checks: ReadyChecks = {
+    db: true,
+    schema: true,
+    stripe: true,
+    github: true,
+  };
 
   try {
     await input.checkDatabase();
   } catch {
-    databaseOk = false;
+    checks.db = false;
     failures.push('Database probe failed');
   }
 
-  const stripe = getStripeReadiness(input.stripe);
-  if (!stripe.configured) {
-    failures.push('Stripe config is incomplete');
+  try {
+    await input.checkSchema();
+  } catch {
+    checks.schema = false;
+    failures.push('Required schema tables are missing');
   }
 
-  const desktopRelease = getDesktopReleaseReadiness(input.desktopRelease);
-  if (!desktopRelease.configured) {
-    failures.push('Desktop release provider config is incomplete');
+  if (input.billingEnabled) {
+    checks.stripe =
+      input.stripe.secretKeyConfigured && input.stripe.webhookSecretConfigured && input.stripe.priceIdConfigured;
+    if (!checks.stripe) {
+      failures.push('Stripe config is incomplete');
+    }
   }
 
-  if (input.deployment.status !== 'supported') {
-    failures.push('Deployment mode is unsupported');
+  if (input.desktopReleaseSource === 'github') {
+    checks.github = input.github.repoConfigured;
+    if (!checks.github) {
+      failures.push('GitHub desktop release config is incomplete');
+    }
   }
 
   return {
-    ok: databaseOk && stripe.configured && desktopRelease.configured && input.deployment.status === 'supported',
-    database: { ok: databaseOk },
-    deployment: input.deployment,
-    stripe,
-    desktopRelease,
+    ok: checks.db && checks.schema && checks.stripe && checks.github,
+    checks,
     failures,
   };
 }

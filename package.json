@@ -9,13 +9,16 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
-    "lint": "turbo run lint",
+    "lint": "pnpm -w lint:ci",
+    "lint:ci": "pnpm --filter @ai-operator/web lint && pnpm --filter @ai-operator/api typecheck && pnpm --filter @ai-operator/shared typecheck && pnpm --filter @ai-operator/desktop typecheck",
     "smoke:from-zero": "bash scripts/smoke/httpSmoke.sh",
     "smoke:ws": "bash scripts/smoke/wsSmoke.sh",
-    "test": "node --test tests/**/*.test.mjs",
+    "test": "pnpm --filter @ai-operator/shared test && pnpm --filter @ai-operator/api test && node --test --test-force-exit tests/**/*.test.mjs",
     "typecheck": "turbo run typecheck",
+    "version:check": "node scripts/version-check.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "check:desktop:csp": "node scripts/check-desktop-csp.mjs"
   },
   "devDependencies": {
     "@types/node": "^20",

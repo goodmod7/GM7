@@ -1,0 +1,38 @@
+groups:
+  - name: ai-operator-api
+    rules:
+      - alert: ApiHigh5xxRate
+        expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(http_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API 5xx error rate is above 5%
+          description: Investigate API failures and downstream dependencies.
+
+      - alert: ApiReadinessFailing
+        expr: increase(readiness_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: API readiness checks are failing
+          description: /ready has returned failures in the last 10 minutes.
+
+      - alert: WsConnectionsDropped
+        expr: ws_connections_current == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: WebSocket device connections dropped to zero
+          description: Check device connectivity and API/WS routing path.
+
+      - alert: StripeWebhookFailures
+        expr: increase(stripe_webhook_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Stripe webhook failures detected
+          description: Signature or processing failures occurred in webhook handling.

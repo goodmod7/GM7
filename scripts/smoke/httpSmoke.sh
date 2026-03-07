@@ -14,6 +14,9 @@ ADMIN_API_KEY_VALUE="${ADMIN_API_KEY_VALUE:-smoke-admin-key}"
 TEST_EMAIL_VALUE="${TEST_EMAIL_VALUE:-smoke-$(date +%s)@example.com}"
 TEST_PASSWORD_VALUE="${TEST_PASSWORD_VALUE:-smoke-pass-123}"
 DATABASE_URL_VALUE="${DATABASE_URL_VALUE:-postgresql://postgres:postgres@localhost:5432/ai_operator}"
+SMOKE_MANAGE_INFRA="${SMOKE_MANAGE_INFRA:-1}"
+SMOKE_START_WEB="${SMOKE_START_WEB:-1}"
+SMOKE_MIGRATE_DEPLOY="${SMOKE_MIGRATE_DEPLOY:-0}"
 CSRF_TOKEN_VALUE=""
 
 cleanup_pid_file() {
@@ -91,11 +94,12 @@ set_subscription_status() {
   TEST_EMAIL="$TEST_EMAIL_VALUE" \
   SUBSCRIPTION_STATUS="$status" \
   DATABASE_URL="$DATABASE_URL_VALUE" \
+  PRISMA_CLIENT_PATH="$ROOT_DIR/apps/api/node_modules/@prisma/client" \
   node --input-type=module <<'EOF'
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { PrismaClient } = require('/workspaces/GM7/apps/api/node_modules/@prisma/client');
+const { PrismaClient } = require(process.env.PRISMA_CLIENT_PATH);
 
 const prisma = new PrismaClient();
 
@@ -110,20 +114,28 @@ try {
 EOF
 }
 
-echo "RESETTING_INFRA=1"
-(
-  cd "$ROOT_DIR/infra"
-  docker compose down -v >/dev/null 2>&1 || true
-  docker compose up -d >/dev/null
-)
+if [[ "$SMOKE_MANAGE_INFRA" == "1" ]]; then
+  echo "RESETTING_INFRA=1"
+  (
+    cd "$ROOT_DIR/infra"
+    docker compose down -v >/dev/null 2>&1 || true
+    docker compose up -d >/dev/null
+  )
 
-wait_for_postgres 60
+  wait_for_postgres 60
+else
+  echo "RESETTING_INFRA=0"
+fi
 
 echo "MIGRATING_DB=1"
 (
   cd "$ROOT_DIR"
   export DATABASE_URL="$DATABASE_URL_VALUE"
-  pnpm --filter @ai-operator/api exec prisma migrate dev >/tmp/ai-operator-prisma-migrate.log
+  if [[ "$SMOKE_MIGRATE_DEPLOY" == "1" ]]; then
+    pnpm --filter @ai-operator/api exec prisma migrate deploy >/tmp/ai-operator-prisma-migrate.log
+  else
+    pnpm --filter @ai-operator/api exec prisma migrate dev >/tmp/ai-operator-prisma-migrate.log
+  fi
 )
 
 cleanup_pid_file "$API_PID_FILE"
@@ -166,16 +178,22 @@ echo "STARTING_API=1"
   echo $! >"$API_PID_FILE"
 )
 
-echo "STARTING_WEB=1"
-(
-  cd "$ROOT_DIR"
-  export NEXT_PUBLIC_API_BASE=http://localhost:3001
-  nohup pnpm --filter @ai-operator/web exec next dev -p 3000 >"$WEB_LOG" 2>&1 &
-  echo $! >"$WEB_PID_FILE"
-)
+if [[ "$SMOKE_START_WEB" == "1" ]]; then
+  echo "STARTING_WEB=1"
+  (
+    cd "$ROOT_DIR"
+    export NEXT_PUBLIC_API_BASE=http://localhost:3001
+    nohup pnpm --filter @ai-operator/web exec next dev -p 3000 >"$WEB_LOG" 2>&1 &
+    echo $! >"$WEB_PID_FILE"
+  )
+else
+  echo "STARTING_WEB=0"
+fi
 
 wait_for_http "$API_BASE/health" 60
-wait_for_http "$WEB_BASE/login" 90
+if [[ "$SMOKE_START_WEB" == "1" ]]; then
+  wait_for_http "$WEB_BASE/login" 90
+fi
 
 echo "REGISTERING_USER=1"
 curl -fsS -X POST "$API_BASE/auth/register" \
@@ -298,4 +316,8 @@ echo "AUTH_CSRF=OK"
 echo "RATE_LIMIT=OK"
 echo "SMOKE_ENV_FILE=$SMOKE_ENV_FILE"
 echo "API_PID=$(cat "$API_PID_FILE")"
-echo "WEB_PID=$(cat "$WEB_PID_FILE")"
+if [[ -f "$WEB_PID_FILE" ]]; then
+  echo "WEB_PID=$(cat "$WEB_PID_FILE")"
+else
+  echo "WEB_PID="
+fi

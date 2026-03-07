@@ -14,9 +14,9 @@ const configSchema = z.object({
   ACCESS_COOKIE_NAME: z.string().default('access_token'),
   REFRESH_COOKIE_NAME: z.string().default('refresh_token'),
   WEB_ORIGIN: z.string().default('http://localhost:3000'),
-  STRIPE_SECRET_KEY: z.string().min(1),
-  STRIPE_WEBHOOK_SECRET: z.string().min(1),
-  STRIPE_PRICE_ID: z.string().min(1),
+  STRIPE_SECRET_KEY: z.string().default(''),
+  STRIPE_WEBHOOK_SECRET: z.string().default(''),
+  STRIPE_PRICE_ID: z.string().default(''),
   APP_BASE_URL: z.string().url().default('http://localhost:3000'),
   API_PUBLIC_BASE_URL: z.string().url().default('http://localhost:3001'),
   DESKTOP_UPDATE_FEED_DIR: z.string().default('./updates'),
@@ -38,6 +38,7 @@ const configSchema = z.object({
     .url()
     .default('https://example.com/downloads/ai-operator-macos-apple-silicon.dmg'),
   ADMIN_API_KEY: z.string().default(''),
+  METRICS_PUBLIC: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   AUTH_LOGIN_PER_MIN: z.string().transform((s) => parseInt(s, 10)).default('10'),
   AUTH_REFRESH_PER_MIN: z.string().transform((s) => parseInt(s, 10)).default('30'),
   BILLING_PER_MIN: z.string().transform((s) => parseInt(s, 10)).default('10'),
@@ -45,6 +46,10 @@ const configSchema = z.object({
   CONTROL_ACTIONS_PER_10S: z.string().transform((s) => parseInt(s, 10)).default('5'),
   TOOL_EVENTS_PER_10S: z.string().transform((s) => parseInt(s, 10)).default('20'),
   SSE_CONNECT_PER_MIN: z.string().transform((s) => parseInt(s, 10)).default('30'),
+  REDIS_URL: z.string().url().default('redis://localhost:6379'),
+  RATE_LIMIT_BACKEND: z.enum(['redis', 'memory']).default('memory'),
+  BILLING_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  RUN_RECOVERY_POLICY: z.enum(['fail', 'cancel']).default('fail'),
 });
 
 function loadConfig() {
@@ -79,6 +84,7 @@ function loadConfig() {
     DESKTOP_MAC_INTEL_URL: process.env.DESKTOP_MAC_INTEL_URL,
     DESKTOP_MAC_ARM_URL: process.env.DESKTOP_MAC_ARM_URL,
     ADMIN_API_KEY: process.env.ADMIN_API_KEY,
+    METRICS_PUBLIC: process.env.METRICS_PUBLIC,
     AUTH_LOGIN_PER_MIN: process.env.AUTH_LOGIN_PER_MIN,
     AUTH_REFRESH_PER_MIN: process.env.AUTH_REFRESH_PER_MIN,
     BILLING_PER_MIN: process.env.BILLING_PER_MIN,
@@ -86,6 +92,10 @@ function loadConfig() {
     CONTROL_ACTIONS_PER_10S: process.env.CONTROL_ACTIONS_PER_10S,
     TOOL_EVENTS_PER_10S: process.env.TOOL_EVENTS_PER_10S,
     SSE_CONNECT_PER_MIN: process.env.SSE_CONNECT_PER_MIN,
+    REDIS_URL: process.env.REDIS_URL,
+    RATE_LIMIT_BACKEND: process.env.RATE_LIMIT_BACKEND,
+    BILLING_ENABLED: process.env.BILLING_ENABLED,
+    RUN_RECOVERY_POLICY: process.env.RUN_RECOVERY_POLICY,
   };
 
   const result = configSchema.safeParse(raw);
@@ -126,6 +136,7 @@ function loadConfig() {
     console.error('   DESKTOP_MAC_INTEL_URL (default: https://example.com/downloads/ai-operator-macos-intel.dmg)');
     console.error('   DESKTOP_MAC_ARM_URL (default: https://example.com/downloads/ai-operator-macos-apple-silicon.dmg)');
     console.error('   ADMIN_API_KEY (default: disabled)');
+    console.error('   METRICS_PUBLIC (default: false)');
     console.error('   AUTH_LOGIN_PER_MIN (default: 10)');
     console.error('   AUTH_REFRESH_PER_MIN (default: 30)');
     console.error('   BILLING_PER_MIN (default: 10)');

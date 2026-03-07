@@ -34,6 +34,8 @@ pnpm -w typecheck
 pnpm format
 ```
 
+For production-like local deployment (Docker + migrations + readiness + monitoring), see [docs/deploying.md](/workspaces/GM7/docs/deploying.md).
+
 ## Development
 
 ### Starting Infrastructure
@@ -72,8 +74,10 @@ REST endpoints:
 - `POST /billing/webhook` - Stripe webhook receiver
 - `GET /downloads/desktop` - Subscription-gated desktop installer metadata
 - `GET /updates/desktop/:platform/:arch/:currentVersion.json` - Desktop updater manifest feed (stubbed in dev)
-- `GET /admin/health` - Admin-only aggregate health metrics (`x-admin-api-key`)
-- `GET /health` - Health check
+- `GET /health` - Liveness endpoint (process up, no DB check)
+- `GET /ready` - Readiness endpoint (DB + schema + environment checks)
+- `GET /admin/health` - Admin-only aggregate health + readiness metrics (`x-admin-api-key`)
+- `GET /metrics` - Admin-only Prometheus metrics (`x-admin-api-key`)
 - `GET /devices` - List all devices
 - `GET /devices/:deviceId` - Get specific device
 - `GET /devices/:deviceId/screen.png` - Get screen preview (Iteration 4)
@@ -148,7 +152,56 @@ CI now compiles the desktop app on both macOS and Windows for pull requests and 
 - Use `stripe listen --forward-to localhost:3001/billing/webhook` and `stripe trigger customer.subscription.updated` to exercise billing webhooks.
 - Use `DESKTOP_RELEASE_SOURCE=file` for local stubbed downloads, or `DESKTOP_RELEASE_SOURCE=github` with `GITHUB_REPO_OWNER` and `GITHUB_REPO_NAME` to make GitHub Releases the source of truth.
 - Set `ADMIN_API_KEY` if you want to use `/admin/health` for aggregate runtime diagnostics.
+- Set `ADMIN_API_KEY` if you want to use `/metrics` for Prometheus scraping (send as `x-admin-api-key`).
+- Rate limits and device presence support `RATE_LIMIT_BACKEND=memory|redis` with `REDIS_URL=redis://localhost:6379`. If Redis is unavailable, the API logs a warning and falls back to in-memory behavior.
+- In-progress run recovery on API restart is controlled by `RUN_RECOVERY_POLICY=fail|cancel` (default: `fail`), marking stale in-progress runs with reason `server_restart`.
 - See [docs/releasing.md](/workspaces/GM7/docs/releasing.md) for the GitHub Actions desktop release flow and required CI secrets.
+
+## Production Deployment
+
+Full deployment guide: [docs/deploying.md](/workspaces/GM7/docs/deploying.md)
+
+### Prod-Like Docker Compose Quickstart
+
+```bash
+cp .env.prod.example .env.prod
+# edit .env.prod with real secrets/URLs
+
+docker compose -f docker-compose.prod.yml --env-file .env.prod build
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d postgres redis migrate api web
+```
+
+With nginx edge proxy and Prometheus profile:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod --profile edge --profile monitoring up -d
+```
+
+### Topology and Scaling
+
+- Single-instance deployment works out of the box.
+- Multi-instance deployment requires shared Postgres plus shared Redis for cross-instance rate limits and device presence.
+- WebSocket device connections are still instance-local. Use sticky routing (device/session affinity) or a dedicated WS gateway so control traffic stays pinned to the owning API instance.
+- Redis-backed presence improves dashboard connection accuracy across instances, but it does not replace WS affinity requirements.
+
+### Required Production Environment
+
+- `WEB_ORIGIN` must match the deployed web origin(s) used by browsers.
+- `JWT_SECRET` must be strong and unique per environment.
+- `ADMIN_API_KEY` must be set to protect `/admin/health` and `/metrics`.
+- If billing is enabled, Stripe envs are required: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`.
+
+### Operational Checks
+
+- Use `GET /health` for liveness only.
+- Use `GET /ready` for readiness (DB connectivity, schema checks, and mode-dependent env checks).
+- Use `GET /metrics` for monitoring export (Prometheus text format, admin-key protected by default).
+- `METRICS_PUBLIC=true` should be used only on private/internal networks.
+
+### Data Safety and Backups
+
+- Back up Postgres regularly (at minimum daily logical backup plus WAL/point-in-time if supported by your infra).
+- Test restore procedures in a staging environment before production cutover.
 
 ## Iteration 5: Remote Control (Safety-First)
 

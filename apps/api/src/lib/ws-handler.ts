@@ -2,7 +2,6 @@ import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import type { IncomingMessage } from 'node:http';
-import { resolve } from 'node:path';
 import type {
   DeviceMessage,
   ServerMessage,
@@ -42,6 +41,8 @@ import { toolsRepo } from '../repos/tools.js';
 import { config } from '../config.js';
 import { ownership } from './ownership.js';
 import { consumeRateLimit } from './ratelimit.js';
+import { clearPresence, setPresence, touchPresence } from './presence.js';
+import { counterLabelsFromRateLimitKey, incCounter, setGauge } from './metrics.js';
 
 // Track connected sockets and their device IDs
 interface SocketState {
@@ -64,7 +65,14 @@ const socketToDevice = new Map<WebSocketLike, SocketState>();
 // HELLO timeout in ms
 const HELLO_TIMEOUT_MS = 10_000;
 const require = createRequire(import.meta.url);
-const wsRuntime = require(resolve(process.cwd(), 'node_modules/.pnpm/@fastify+websocket@10.0.1/node_modules/ws')) as {
+const wsRuntime = (() => {
+  try {
+    return require('ws');
+  } catch {
+    const fastifyWebsocketEntry = require.resolve('@fastify/websocket');
+    return require(require.resolve('ws', { paths: [fastifyWebsocketEntry] }));
+  }
+})() as {
   WebSocketServer: new (options: { noServer: boolean }) => {
     handleUpgrade(
       request: IncomingMessage,
@@ -161,18 +169,23 @@ function getToolAuditMeta(toolCall: ToolCall, result?: { ok: boolean; exitCode?:
   };
 }
 
-function enforceSocketRateLimit(
+async function enforceSocketRateLimit(
   socket: WebSocketLike,
   fastify: FastifyInstance,
   state: SocketState | undefined,
   key: string,
   limit: number,
   windowMs: number
-): boolean {
-  const result = consumeRateLimit(key, limit, windowMs);
+): Promise<boolean> {
+  const result = await consumeRateLimit(key, limit, windowMs, {
+    backend: config.RATE_LIMIT_BACKEND,
+    redisUrl: config.REDIS_URL,
+  });
   if (result.allowed) {
     return true;
   }
+
+  incCounter('rate_limit_hits_total', counterLabelsFromRateLimitKey(key));
 
   fastify.log.warn(
     {
@@ -234,6 +247,7 @@ function handleSocketConnection(
     });
 
     fastify.log.info({ connectionId, clientIp, count: socketToDevice.size }, 'WebSocket client connected');
+    setGauge('ws_connections_current', socketToDevice.size);
 
     // Set hello timeout
     const helloTimeout = setTimeout(() => {
@@ -331,8 +345,10 @@ function handleSocketConnection(
       const state = socketToDevice.get(socket);
       if (state) {
         socketToDevice.delete(socket);
+        setGauge('ws_connections_current', socketToDevice.size);
         if (state.helloReceived) {
           deviceStore.setConnected(state.deviceId, false);
+          void clearPresence(config.RATE_LIMIT_BACKEND, config.REDIS_URL, state.deviceId);
           fastify.log.info({ connectionId: state.connectionId, deviceId: state.deviceId, count: socketToDevice.size }, 'Device disconnected');
         } else {
           fastify.log.info({ connectionId: state.connectionId, clientIp: state.ip, count: socketToDevice.size }, 'Client disconnected (never sent hello)');
@@ -353,6 +369,10 @@ async function handleDeviceMessage(
   fastify: FastifyInstance
 ): Promise<void> {
   const { type, payload, requestId } = message;
+  const socketState = socketToDevice.get(socket);
+  if (socketState?.helloReceived && socketState.deviceId !== 'unknown') {
+    await touchPresence(config.RATE_LIMIT_BACKEND, config.REDIS_URL, socketState.deviceId);
+  }
 
   switch (type) {
     case 'device.hello': {
@@ -408,6 +428,7 @@ async function handleDeviceMessage(
       });
 
       fastify.log.info({ connectionId: state?.connectionId, deviceId, platform }, 'Device registered');
+      await setPresence(config.RATE_LIMIT_BACKEND, config.REDIS_URL, deviceId, ownerUserId, true);
       await createSocketAuditEvent(state, {
         userId: ownerUserId,
         deviceId,
@@ -763,14 +784,14 @@ async function handleDeviceMessage(
     case 'device.action.ack': {
       const { deviceId, actionId, status } = payload;
       const state = socketToDevice.get(socket);
-      if (!enforceSocketRateLimit(
+      if (!(await enforceSocketRateLimit(
         socket,
         fastify,
         state,
         `device:${deviceId}:control:ingest`,
         config.CONTROL_ACTIONS_PER_10S,
         10_000
-      )) {
+      ))) {
         return;
       }
       fastify.log.info({ deviceId, actionId, status }, 'Action ack received');
@@ -796,14 +817,14 @@ async function handleDeviceMessage(
     case 'device.action.result': {
       const { deviceId, actionId, ok, error } = payload;
       const state = socketToDevice.get(socket);
-      if (!enforceSocketRateLimit(
+      if (!(await enforceSocketRateLimit(
         socket,
         fastify,
         state,
         `device:${deviceId}:control:ingest`,
         config.CONTROL_ACTIONS_PER_10S,
         10_000
-      )) {
+      ))) {
         return;
       }
       fastify.log.info({ deviceId, actionId, ok }, 'Action result received');
@@ -875,14 +896,14 @@ async function handleDeviceMessage(
     case 'device.action.create': {
       const { deviceId, actionId, runId, action, source, createdAt } = payload;
       const state = socketToDevice.get(socket);
-      if (!enforceSocketRateLimit(
+      if (!(await enforceSocketRateLimit(
         socket,
         fastify,
         state,
         `device:${deviceId}:control:ingest`,
         config.CONTROL_ACTIONS_PER_10S,
         10_000
-      )) {
+      ))) {
         return;
       }
       
@@ -962,14 +983,14 @@ async function handleDeviceMessage(
     case 'device.tool.request': {
       const { deviceId, runId, toolEventId, toolCallId, toolCall, at } = payload;
       const state = socketToDevice.get(socket);
-      if (!enforceSocketRateLimit(
+      if (!(await enforceSocketRateLimit(
         socket,
         fastify,
         state,
         `device:${deviceId}:tool:ingest`,
         config.TOOL_EVENTS_PER_10S,
         10_000
-      )) {
+      ))) {
         return;
       }
 
@@ -1014,14 +1035,14 @@ async function handleDeviceMessage(
     case 'device.tool.result': {
       const { deviceId, runId, toolEventId, toolCallId, toolCall, result, at } = payload;
       const state = socketToDevice.get(socket);
-      if (!enforceSocketRateLimit(
+      if (!(await enforceSocketRateLimit(
         socket,
         fastify,
         state,
         `device:${deviceId}:tool:ingest`,
         config.TOOL_EVENTS_PER_10S,
         10_000
-      )) {
+      ))) {
         return;
       }
 

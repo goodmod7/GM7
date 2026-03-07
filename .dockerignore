@@ -1,0 +1,15 @@
+.git
+.github
+node_modules
+**/node_modules
+.pnpm-store
+.turbo
+infra/postgres-data
+infra/redis-data
+apps/*/dist
+apps/web/.next
+coverage
+*.log
+.env
+.env.*
+!.env.prod.example

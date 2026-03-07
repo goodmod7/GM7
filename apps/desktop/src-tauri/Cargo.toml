@@ -1,6 +1,6 @@
 [package]
 name = "ai-operator-desktop"
-version = "0.0.5"
+version = "0.0.6"
 description = "AI Operator Desktop App"
 authors = ["you"]
 edition = "2021"

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../db/prisma.js';
+import { incCounter, metricLabels } from '../lib/metrics.js';
 
 export interface AuditEventInput {
   userId?: string | null;
@@ -43,5 +44,6 @@ export const auditRepo = {
       input.userAgent ?? null,
       metaJson
     );
+    incCounter('audit_events_total', metricLabels({ eventType: input.eventType }));
   },
 };

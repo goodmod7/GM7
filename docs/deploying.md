@@ -50,6 +50,9 @@ cp .env.prod.example .env.prod
 - `JWT_SECRET`
 - `ADMIN_API_KEY`
 - Stripe vars if billing enabled
+- leave `ALLOW_INSECURE_DEV=false` in production
+- review retention defaults: `AUDIT_RETENTION_DAYS`, `STRIPE_EVENT_RETENTION_DAYS`, `SESSION_RETENTION_DAYS`, `RUN_RETENTION_DAYS`
+- if you distribute desktop builds, compile them with `VITE_API_HTTP_BASE=https://...` and `VITE_API_WS_URL=wss://...`
 
 3. Keep these secure:
 - `JWT_SECRET`
@@ -57,7 +60,15 @@ cp .env.prod.example .env.prod
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 
+4. For macOS desktop rollouts, plan operator onboarding for native permissions:
+- Screen preview/capture requires **Screen Recording**
+- Remote input injection requires **Accessibility**
+- The packaged desktop can open the relevant System Settings panes from Settings > Permissions
+- Include this step in your rollout checklist before expecting remote-control features to work
+
 Never commit `.env.prod`.
+
+See [docs/security.md](/workspaces/GM7/docs/security.md) for the current threat model, remote-control guardrails, and secrets-handling guidance.
 
 ## Migrations Strategy (Production)
 
@@ -162,5 +173,10 @@ Provider-agnostic checklist:
 
 - Do not expose `METRICS_PUBLIC=true` on the public internet.
 - Keep `ADMIN_API_KEY` private.
+- Keep `ALLOW_INSECURE_DEV=false` in production so insecure origins are rejected at startup.
+- Use HTTPS for `WEB_ORIGIN`, `APP_BASE_URL`, and `API_PUBLIC_BASE_URL`.
+- Use `https://` and `wss://` API endpoints in production desktop packages. `VITE_DESKTOP_ALLOW_INSECURE_LOCALHOST=true` is only for local debug packaging.
+- For macOS production deployments, document Screen Recording and Accessibility approval steps for operators and support staff.
 - Keep screenshot handling memory-only (no disk/database persistence).
 - Keep local approval model unchanged for control/tool actions.
+- Do not store local LLM API keys server-side.

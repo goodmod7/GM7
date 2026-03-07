@@ -1,0 +1,35 @@
+identifier = "desktop-ipc"
+description = "Allows the main desktop window to invoke the audited application IPC commands."
+
+commands.allow = [
+  "autostart_is_enabled",
+  "autostart_set_enabled",
+  "autostart_supported",
+  "capture_display_png",
+  "clear_llm_api_key",
+  "device_token_clear",
+  "device_token_get",
+  "device_token_set",
+  "has_llm_api_key",
+  "input_click",
+  "input_double_click",
+  "input_hotkey",
+  "input_scroll",
+  "input_type",
+  "list_displays",
+  "llm_propose_next_action",
+  "main_window_hide",
+  "main_window_show",
+  "open_external_url",
+  "permissions_get_status",
+  "permissions_open_settings",
+  "set_llm_api_key",
+  "tool_execute",
+  "tray_update_state",
+  "workspace_clear",
+  "workspace_configure",
+  "workspace_get_state",
+  "workspace_select_directory"
+]
+
+commands.deny = []

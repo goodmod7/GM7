@@ -24,35 +24,87 @@ test('cookie-auth mutations require CSRF while auth and bearer requests are skip
   applyApiEnv();
   const { shouldCheckCsrf } = await import('../apps/api/dist/lib/auth.js');
 
-  assert.equal(
-    shouldCheckCsrf({
-      method: 'POST',
-      url: '/devices/device-1/pair',
-      headers: {},
+  const cookieProtectedRoutes = [
+    {
+      url: '/auth/refresh',
+      cookies: { refresh_token: 'cookie-refresh' },
+    },
+    {
+      url: '/auth/logout',
+      cookies: { refresh_token: 'cookie-refresh' },
+    },
+    {
+      url: '/auth/logout_all',
       cookies: { access_token: 'cookie-access' },
-    }),
-    true
-  );
-
-  assert.equal(
-    shouldCheckCsrf({
-      method: 'POST',
-      url: '/auth/login',
-      headers: {},
+    },
+    {
+      url: '/billing/checkout',
       cookies: { access_token: 'cookie-access' },
-    }),
-    false
-  );
-
-  assert.equal(
-    shouldCheckCsrf({
-      method: 'POST',
+    },
+    {
+      url: '/billing/portal',
+      cookies: { access_token: 'cookie-access' },
+    },
+    {
       url: '/devices/device-1/pair',
-      headers: { authorization: 'Bearer token-value' },
-      cookies: {},
-    }),
-    false
-  );
+      cookies: { access_token: 'cookie-access' },
+    },
+    {
+      url: '/devices/device-1/actions',
+      cookies: { access_token: 'cookie-access' },
+    },
+    {
+      url: '/runs',
+      cookies: { access_token: 'cookie-access' },
+    },
+    {
+      url: '/runs/run-1/cancel',
+      cookies: { access_token: 'cookie-access' },
+    },
+  ];
+
+  for (const route of cookieProtectedRoutes) {
+    assert.equal(
+      shouldCheckCsrf({
+        method: 'POST',
+        url: route.url,
+        headers: {},
+        cookies: route.cookies,
+      }),
+      true,
+      `expected ${route.url} to require CSRF for cookie auth`
+    );
+
+    assert.equal(
+      shouldCheckCsrf({
+        method: 'POST',
+        url: route.url,
+        headers: { authorization: 'Bearer token-value' },
+        cookies: {},
+      }),
+      false,
+      `expected bearer auth to bypass CSRF on ${route.url}`
+    );
+  }
+
+  const csrfExemptRoutes = [
+    '/auth/login',
+    '/auth/register',
+    '/billing/webhook',
+  ];
+
+  for (const url of csrfExemptRoutes) {
+    assert.equal(
+      shouldCheckCsrf({
+        method: 'POST',
+        url,
+        headers: {},
+        cookies: { access_token: 'cookie-access', refresh_token: 'cookie-refresh' },
+      }),
+      false,
+      `expected ${url} to remain CSRF exempt`
+    );
+  }
 });
 
 test('CSRF validation requires matching header and cookie values', async () => {

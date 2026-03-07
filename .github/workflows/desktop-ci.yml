@@ -49,8 +49,8 @@ jobs:
       - name: Build shared package
         run: pnpm --filter @ai-operator/shared build
 
-      - name: Validate desktop CSP (prod mode)
-        run: VITE_DESKTOP_CSP_MODE=prod pnpm check:desktop:csp
+      - name: Validate desktop security config
+        run: pnpm check:desktop:security
 
       - name: Run desktop compile checks
         run: pnpm --filter @ai-operator/desktop tauri:check
@@ -97,8 +97,8 @@ jobs:
       - name: Build shared package
         run: pnpm --filter @ai-operator/shared build
 
-      - name: Validate desktop CSP (prod mode)
-        run: VITE_DESKTOP_CSP_MODE=prod pnpm check:desktop:csp
+      - name: Validate desktop security config
+        run: pnpm check:desktop:security
 
       - name: Run desktop compile checks
         run: pnpm --filter @ai-operator/desktop tauri:check

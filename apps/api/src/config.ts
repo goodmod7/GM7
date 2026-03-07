@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { assertSupportedDeploymentMode } from './lib/deployment.js';
+import { validateSecurityRuntimeConfig } from './lib/security.js';
 
 const configSchema = z.object({
   PORT: z.string().transform((s) => parseInt(s, 10)).default('3001'),
@@ -14,6 +15,7 @@ const configSchema = z.object({
   ACCESS_COOKIE_NAME: z.string().default('access_token'),
   REFRESH_COOKIE_NAME: z.string().default('refresh_token'),
   WEB_ORIGIN: z.string().default('http://localhost:3000'),
+  ALLOW_INSECURE_DEV: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
   STRIPE_SECRET_KEY: z.string().default(''),
   STRIPE_WEBHOOK_SECRET: z.string().default(''),
   STRIPE_PRICE_ID: z.string().default(''),
@@ -46,6 +48,10 @@ const configSchema = z.object({
   CONTROL_ACTIONS_PER_10S: z.string().transform((s) => parseInt(s, 10)).default('5'),
   TOOL_EVENTS_PER_10S: z.string().transform((s) => parseInt(s, 10)).default('20'),
   SSE_CONNECT_PER_MIN: z.string().transform((s) => parseInt(s, 10)).default('30'),
+  AUDIT_RETENTION_DAYS: z.string().transform((s) => parseInt(s, 10)).default('30'),
+  STRIPE_EVENT_RETENTION_DAYS: z.string().transform((s) => parseInt(s, 10)).default('30'),
+  SESSION_RETENTION_DAYS: z.string().transform((s) => parseInt(s, 10)).default('30'),
+  RUN_RETENTION_DAYS: z.string().transform((s) => parseInt(s, 10)).default('90'),
   REDIS_URL: z.string().url().default('redis://localhost:6379'),
   RATE_LIMIT_BACKEND: z.enum(['redis', 'memory']).default('memory'),
   BILLING_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
@@ -66,6 +72,7 @@ function loadConfig() {
     ACCESS_COOKIE_NAME: process.env.ACCESS_COOKIE_NAME,
     REFRESH_COOKIE_NAME: process.env.REFRESH_COOKIE_NAME,
     WEB_ORIGIN: process.env.WEB_ORIGIN,
+    ALLOW_INSECURE_DEV: process.env.ALLOW_INSECURE_DEV,
     STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
     STRIPE_PRICE_ID: process.env.STRIPE_PRICE_ID,
@@ -92,6 +99,10 @@ function loadConfig() {
     CONTROL_ACTIONS_PER_10S: process.env.CONTROL_ACTIONS_PER_10S,
     TOOL_EVENTS_PER_10S: process.env.TOOL_EVENTS_PER_10S,
     SSE_CONNECT_PER_MIN: process.env.SSE_CONNECT_PER_MIN,
+    AUDIT_RETENTION_DAYS: process.env.AUDIT_RETENTION_DAYS,
+    STRIPE_EVENT_RETENTION_DAYS: process.env.STRIPE_EVENT_RETENTION_DAYS,
+    SESSION_RETENTION_DAYS: process.env.SESSION_RETENTION_DAYS,
+    RUN_RETENTION_DAYS: process.env.RUN_RETENTION_DAYS,
     REDIS_URL: process.env.REDIS_URL,
     RATE_LIMIT_BACKEND: process.env.RATE_LIMIT_BACKEND,
     BILLING_ENABLED: process.env.BILLING_ENABLED,
@@ -118,6 +129,7 @@ function loadConfig() {
     console.error('   ACCESS_COOKIE_NAME (default: access_token)');
     console.error('   REFRESH_COOKIE_NAME (default: refresh_token)');
     console.error('   WEB_ORIGIN (default: http://localhost:3000)');
+    console.error('   ALLOW_INSECURE_DEV (default: false)');
     console.error('   STRIPE_SECRET_KEY');
     console.error('   STRIPE_WEBHOOK_SECRET');
     console.error('   STRIPE_PRICE_ID');
@@ -144,16 +156,34 @@ function loadConfig() {
     console.error('   CONTROL_ACTIONS_PER_10S (default: 5)');
     console.error('   TOOL_EVENTS_PER_10S (default: 20)');
     console.error('   SSE_CONNECT_PER_MIN (default: 30)');
+    console.error('   AUDIT_RETENTION_DAYS (default: 30)');
+    console.error('   STRIPE_EVENT_RETENTION_DAYS (default: 30)');
+    console.error('   SESSION_RETENTION_DAYS (default: 30)');
+    console.error('   RUN_RETENTION_DAYS (default: 90)');
     process.exit(1);
   }
 
-  assertSupportedDeploymentMode(result.data.DEPLOYMENT_MODE);
+  const webOrigins = result.data.WEB_ORIGIN.split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  try {
+    assertSupportedDeploymentMode(result.data.DEPLOYMENT_MODE);
+    validateSecurityRuntimeConfig({
+      nodeEnv: result.data.NODE_ENV,
+      allowInsecureDev: result.data.ALLOW_INSECURE_DEV,
+      appBaseUrl: result.data.APP_BASE_URL,
+      webOrigins,
+    });
+  } catch (error) {
+    console.error('❌ Invalid configuration:');
+    console.error(`   - ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 
   return {
     ...result.data,
-    WEB_ORIGINS: result.data.WEB_ORIGIN.split(',')
-      .map((origin) => origin.trim())
-      .filter(Boolean),
+    WEB_ORIGINS: webOrigins,
   };
 }
 

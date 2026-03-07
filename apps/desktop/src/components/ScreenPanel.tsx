@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ScreenStreamer, type DisplayInfo, type CaptureError } from '../lib/screenStreamer.js';
+import { getPermissionInstructions, type NativePermissionStatus, type PermissionTarget } from '../lib/permissions.js';
 import type { WsClient } from '../lib/wsClient.js';
 
 
@@ -9,9 +10,21 @@ interface ScreenPanelProps {
   enabled: boolean;
   onToggle: (enabled: boolean) => void;
   onDisplayChange?: (displayId: string) => void;
+  permissionStatus: NativePermissionStatus;
+  onOpenPermissionSettings: (target: PermissionTarget) => void;
+  onPermissionIssue?: (message: string) => void;
 }
 
-export function ScreenPanel({ wsClient, deviceId, enabled, onToggle, onDisplayChange }: ScreenPanelProps) {
+export function ScreenPanel({
+  wsClient,
+  deviceId,
+  enabled,
+  onToggle,
+  onDisplayChange,
+  permissionStatus,
+  onOpenPermissionSettings,
+  onPermissionIssue,
+}: ScreenPanelProps) {
   const [streamer, setStreamer] = useState<ScreenStreamer | null>(null);
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [hasLoadedDisplays, setHasLoadedDisplays] = useState(false);
@@ -36,6 +49,9 @@ export function ScreenPanel({ wsClient, deviceId, enabled, onToggle, onDisplayCh
       onError: (err: CaptureError) => {
         setError(err.message);
         setNeedsPermission(err.needsPermission);
+        if (err.needsPermission) {
+          onPermissionIssue?.(err.message);
+        }
         if (err.needsPermission) {
           onToggle(false);
         }
@@ -115,6 +131,8 @@ export function ScreenPanel({ wsClient, deviceId, enabled, onToggle, onDisplayCh
     onDisplayChange?.(displayId);
   }, [onDisplayChange]);
 
+  const screenRecordingInstructions = getPermissionInstructions('screenRecording');
+
   return (
     <div
       style={{
@@ -141,6 +159,27 @@ export function ScreenPanel({ wsClient, deviceId, enabled, onToggle, onDisplayCh
         >
           <strong>Permission Required:</strong> Screen Recording permission is needed. 
           Enable it in System Settings &gt; Privacy &amp; Security &gt; Screen Recording for this app.
+          <div style={{ marginTop: '0.75rem', fontSize: '0.8125rem', lineHeight: 1.5 }}>
+            {screenRecordingInstructions.map((step) => (
+              <div key={step}>{step}</div>
+            ))}
+          </div>
+          <div style={{ marginTop: '0.75rem' }}>
+            <button
+              onClick={() => onOpenPermissionSettings('screenRecording')}
+              style={{
+                padding: '0.5rem 0.75rem',
+                backgroundColor: '#92400e',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '0.75rem',
+              }}
+            >
+              Open Screen Recording Settings
+            </button>
+          </div>
         </div>
       )}
 
@@ -252,6 +291,10 @@ export function ScreenPanel({ wsClient, deviceId, enabled, onToggle, onDisplayCh
       <p style={{ marginTop: '1rem', fontSize: '0.75rem', color: '#666' }}>
         Privacy: Screen preview is opt-in. Only the latest frame is stored on the server (expires in 60s).
         Max resolution: 1280px width. No recording or persistent storage.
+      </p>
+
+      <p style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: '#666' }}>
+        Native permission status: Screen Recording is <strong>{permissionStatus.screenRecording}</strong>.
       </p>
     </div>
   );

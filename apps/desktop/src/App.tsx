@@ -4,9 +4,26 @@ import { listen } from '@tauri-apps/api/event';
 import type { ServerMessage, ServerPairingCode, ServerChatMessage, RunWithSteps, ApprovalRequest, InputAction, AgentProposal } from '@ai-operator/shared';
 import { WsClient, type ConnectionStatus } from './lib/wsClient.js';
 import { executeAction } from './lib/actionExecutor.js';
+import {
+  APPROVAL_TIMEOUT_MS,
+  approvalController,
+  getApprovalRiskForAction,
+  getApprovalRiskForTool,
+  summarizeInputAction,
+  summarizeToolCall,
+  type ApprovalChangeEvent,
+  type ApprovalItem,
+} from './lib/approvals.js';
 import { AiAssistController, type LlmSettings, type LocalToolEvent } from './lib/aiAssist.js';
+import { desktopRuntimeConfig } from './lib/desktopRuntimeConfig.js';
+import {
+  getPermissionStatus,
+  openPermissionSettings,
+  type NativePermissionStatus,
+  type PermissionTarget,
+} from './lib/permissions.js';
 import { getWorkspaceState, type LocalWorkspaceState } from './lib/workspace.js';
-import { getSettings, setSetting, subscribe, type LocalSettingsState } from './lib/localSettings.js';
+import { getSettings, setSetting, subscribe, updateSettings, type LocalSettingsState } from './lib/localSettings.js';
 import { ChatOverlay } from './components/ChatOverlay.js';
 import { RunPanel } from './components/RunPanel.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
@@ -66,9 +83,6 @@ function detectPlatform(): 'macos' | 'windows' | 'linux' | 'unknown' {
   return 'unknown';
 }
 
-// Get WebSocket URL from env or default
-const WS_URL = import.meta.env.VITE_API_WS_URL || 'ws://localhost:3001/ws';
-
 interface ChatItem {
   id: string;
   role: 'user' | 'agent';
@@ -76,9 +90,36 @@ interface ChatItem {
   timestamp: number;
 }
 
+interface PendingControlApprovalPayload {
+  actionId: string;
+  action: InputAction;
+}
+
+type PendingProposalPayload =
+  | {
+      proposalId: string;
+      proposal: Extract<AgentProposal, { kind: 'propose_action' }>;
+    }
+  | {
+      proposalId: string;
+      proposal: Extract<AgentProposal, { kind: 'propose_tool' }>;
+    };
+
+const DEFAULT_PERMISSION_STATUS: NativePermissionStatus = {
+  screenRecording: 'unknown',
+  accessibility: 'unknown',
+};
+
+function getNextPendingApproval(items: ApprovalItem[], kind: ApprovalItem['kind']): ApprovalItem | null {
+  const pending = items
+    .filter((item) => item.kind === kind && item.state === 'pending')
+    .sort((a, b) => a.createdAt - b.createdAt);
+  return pending[0] || null;
+}
+
 function App() {
   const [client, setClient] = useState<WsClient | null>(null);
-  const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+  const [status, setStatus] = useState<ConnectionStatus>(desktopRuntimeConfig.ok ? 'disconnected' : 'error');
   const [messages, setMessages] = useState<ChatItem[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairingExpiresAt, setPairingExpiresAt] = useState<number | null>(null);
@@ -95,8 +136,13 @@ function App() {
   const [pendingApproval, setPendingApproval] = useState<{ runId: string; approval: ApprovalRequest } | null>(null);
   
   // Control state
-  const [pendingAction, setPendingAction] = useState<{ actionId: string; action: InputAction } | null>(null);
   const [inputPermissionError, setInputPermissionError] = useState<string | null>(null);
+  const [approvalItems, setApprovalItems] = useState<ApprovalItem[]>(() => approvalController.getItems());
+  const [permissionStatus, setPermissionStatus] = useState<NativePermissionStatus>(DEFAULT_PERMISSION_STATUS);
+  const [permissionStatusBusy, setPermissionStatusBusy] = useState(false);
+  const [permissionHintTarget, setPermissionHintTarget] = useState<PermissionTarget | null>(null);
+  const [permissionHintMessage, setPermissionHintMessage] = useState<string | null>(null);
+  const [diagnosticsStatus, setDiagnosticsStatus] = useState<string | null>(null);
 
   // Iteration 6: AI Assist state
   const [aiController, setAiController] = useState<AiAssistController | null>(null);
@@ -113,14 +159,135 @@ function App() {
   const [workspaceState, setWorkspaceState] = useState<LocalWorkspaceState>({ configured: false });
   const [toolHistoryByRun, setToolHistoryByRun] = useState<Record<string, LocalToolEvent[]>>({});
   const controlEnabledRef = useRef(localSettings.allowControlEnabled);
+  const workspaceConfiguredRef = useRef(workspaceState.configured);
+  const clientRef = useRef<WsClient | null>(null);
+  const controlApprovalPayloadsRef = useRef(new Map<string, PendingControlApprovalPayload>());
+  const proposalApprovalPayloadsRef = useRef(new Map<string, PendingProposalPayload>());
+  const runtimeConfig = desktopRuntimeConfig.ok ? desktopRuntimeConfig.config : null;
+  const runtimeConfigError = desktopRuntimeConfig.ok ? null : desktopRuntimeConfig.message;
+
+  const refreshPermissionStatus = useCallback(async () => {
+    setPermissionStatusBusy(true);
+    try {
+      const nextStatus = await getPermissionStatus();
+      setPermissionStatus(nextStatus);
+    } catch (err) {
+      console.error('[App] Failed to load permission status:', err);
+    } finally {
+      setPermissionStatusBusy(false);
+    }
+  }, []);
+
+  const notePermissionIssue = useCallback((target: PermissionTarget, message: string) => {
+    setPermissionHintTarget(target);
+    setPermissionHintMessage(message);
+    void refreshPermissionStatus();
+  }, [refreshPermissionStatus]);
+
+  const handleOpenPermissionSettings = useCallback(async (target: PermissionTarget) => {
+    try {
+      await openPermissionSettings(target);
+      setDiagnosticsStatus(
+        target === 'screenRecording'
+          ? 'Opened Screen Recording settings.'
+          : 'Opened Accessibility settings.'
+      );
+    } catch (err) {
+      setDiagnosticsStatus(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const handleExportDiagnostics = useCallback(async () => {
+    const payload = approvalController.exportDiagnostics(permissionStatus);
+    try {
+      await navigator.clipboard.writeText(payload);
+      setDiagnosticsStatus('Redacted diagnostics copied to clipboard.');
+    } catch (err) {
+      setDiagnosticsStatus(err instanceof Error ? err.message : 'Failed to copy diagnostics.');
+    }
+  }, [permissionStatus]);
+
+  const handleApprovalEvent = useCallback((event?: ApprovalChangeEvent) => {
+    if (!event) {
+      return;
+    }
+
+    const item = event.item;
+
+    if (item.kind === 'control_action') {
+      const payload = controlApprovalPayloadsRef.current.get(item.id);
+      if (!payload) {
+        return;
+      }
+
+      if (item.state === 'denied') {
+        clientRef.current?.sendActionAck(payload.actionId, 'denied');
+        clientRef.current?.sendActionResult(payload.actionId, false, {
+          code: 'DENIED_BY_USER',
+          message: 'User denied the action',
+        });
+        controlApprovalPayloadsRef.current.delete(item.id);
+      } else if (item.state === 'expired') {
+        clientRef.current?.sendActionResult(payload.actionId, false, {
+          code: 'APPROVAL_EXPIRED',
+          message: 'Local approval expired before execution',
+        });
+        controlApprovalPayloadsRef.current.delete(item.id);
+      } else if (item.state === 'canceled') {
+        clientRef.current?.sendActionResult(payload.actionId, false, {
+          code: 'CANCELED',
+          message: item.error || 'Local approval was canceled',
+        });
+        controlApprovalPayloadsRef.current.delete(item.id);
+      } else if (item.state === 'executed' || item.state === 'failed') {
+        controlApprovalPayloadsRef.current.delete(item.id);
+      }
+
+      return;
+    }
+
+    const proposalPayload = proposalApprovalPayloadsRef.current.get(item.id);
+    if (!proposalPayload) {
+      return;
+    }
+
+    if (item.state === 'denied' || item.state === 'expired' || item.state === 'canceled') {
+      const resume =
+        item.state !== 'canceled' ||
+        !item.error ||
+        (!item.error.includes('Stop all') &&
+          !item.error.includes('Screen Preview disabled') &&
+          !item.error.includes('AI Assist paused') &&
+          !item.error.includes('AI Assist stopped'));
+      aiControllerRef.current?.dismissPendingProposal(
+        item.state === 'denied'
+          ? 'User denied the pending proposal'
+          : item.state === 'expired'
+          ? 'Approval expired before execution'
+          : item.error || 'Proposal canceled',
+        resume
+      );
+      proposalApprovalPayloadsRef.current.delete(item.id);
+    } else if (item.state === 'executed' || item.state === 'failed') {
+      proposalApprovalPayloadsRef.current.delete(item.id);
+    }
+  }, []);
 
   useEffect(() => {
     aiControllerRef.current = aiController;
   }, [aiController]);
 
   useEffect(() => {
+    clientRef.current = client;
+  }, [client]);
+
+  useEffect(() => {
     controlEnabledRef.current = localSettings.allowControlEnabled;
   }, [localSettings.allowControlEnabled]);
+
+  useEffect(() => {
+    workspaceConfiguredRef.current = workspaceState.configured;
+  }, [workspaceState.configured]);
 
   useEffect(() => {
     setLocalSettingsState(getSettings());
@@ -129,6 +296,21 @@ function App() {
     });
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    void refreshPermissionStatus();
+  }, [refreshPermissionStatus]);
+
+  useEffect(() => {
+    approvalController.start();
+    const unsubscribe = approvalController.subscribe((items, event) => {
+      setApprovalItems(items);
+      handleApprovalEvent(event);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [handleApprovalEvent]);
 
   useEffect(() => {
     let cancelled = false;
@@ -227,6 +409,20 @@ function App() {
     };
   }, [trayNotice]);
 
+  useEffect(() => {
+    if (!diagnosticsStatus) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setDiagnosticsStatus(null);
+    }, 4000);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [diagnosticsStatus]);
+
   // Initialize client on mount
   useEffect(() => {
     const id = getOrCreateDeviceId();
@@ -256,6 +452,12 @@ function App() {
       });
 
     void (async () => {
+      if (!runtimeConfig) {
+        console.error('[App] Desktop API configuration invalid:', runtimeConfigError || 'unknown error');
+        setStatus('error');
+        return;
+      }
+
       let deviceToken: string | undefined;
 
       try {
@@ -345,12 +547,28 @@ function App() {
         // Control callbacks
         onActionRequest: (actionId, action) => {
           console.log('[App] Action request:', actionId, action.kind);
-          // Only show if control is enabled
-          if (controlEnabledRef.current) {
-            setPendingAction({ actionId, action });
-            // Send ack that we're showing the modal
-            wsClient?.sendActionAck(actionId, 'awaiting_user');
+          const createdAt = Date.now();
+          const approvalId = approvalController.createApproval({
+            kind: 'control_action',
+            createdAt,
+            expiresAt: createdAt + APPROVAL_TIMEOUT_MS,
+            summary: summarizeInputAction(action),
+            risk: getApprovalRiskForAction(action),
+            actionId,
+            source: 'web',
+          });
+
+          controlApprovalPayloadsRef.current.set(approvalId, {
+            actionId,
+            action,
+          });
+
+          if (!controlEnabledRef.current) {
+            approvalController.cancel(approvalId, 'Allow Control disabled');
+            return;
           }
+
+          wsClient?.sendActionAck(actionId, 'awaiting_user');
         },
         // Iteration 6: AI Assist callbacks
         onRunStart: (runId, goal, mode) => {
@@ -363,7 +581,7 @@ function App() {
       });
 
       setClient(wsClient);
-      wsClient.connect(WS_URL);
+      wsClient.connect(runtimeConfig.wsUrl);
 
       if (getSettings().startMinimizedToTray) {
         setTimeout(() => {
@@ -418,6 +636,83 @@ function App() {
     aiState?.isRunning,
     aiState?.status,
   ]);
+
+  useEffect(() => {
+    if (aiState?.status !== 'awaiting_approval' || !aiState.currentProposalId || !currentProposal) {
+      return;
+    }
+
+    for (const payload of proposalApprovalPayloadsRef.current.values()) {
+      if (payload.proposalId === aiState.currentProposalId) {
+        return;
+      }
+    }
+
+    const createdAt = Date.now();
+
+    if (currentProposal.kind === 'propose_action') {
+      const approvalId = approvalController.createApproval({
+        kind: 'ai_proposal',
+        createdAt,
+        expiresAt: createdAt + APPROVAL_TIMEOUT_MS,
+        summary: summarizeInputAction(currentProposal.action),
+        risk: getApprovalRiskForAction(currentProposal.action),
+        runId: activeRun?.runId,
+        source: 'agent',
+      });
+      proposalApprovalPayloadsRef.current.set(approvalId, {
+        proposalId: aiState.currentProposalId,
+        proposal: currentProposal,
+      });
+      return;
+    }
+
+    if (currentProposal.kind === 'propose_tool') {
+      const approvalId = approvalController.createApproval({
+        kind: 'tool_call',
+        createdAt,
+        expiresAt: createdAt + APPROVAL_TIMEOUT_MS,
+        summary: summarizeToolCall(currentProposal.toolCall),
+        risk: getApprovalRiskForTool(currentProposal.toolCall),
+        runId: activeRun?.runId,
+        toolId: aiState.currentProposalId,
+        source: 'agent',
+      });
+      proposalApprovalPayloadsRef.current.set(approvalId, {
+        proposalId: aiState.currentProposalId,
+        proposal: currentProposal,
+      });
+    }
+  }, [activeRun?.runId, aiState?.currentProposalId, aiState?.status, currentProposal]);
+
+  useEffect(() => {
+    if (!localSettings.allowControlEnabled) {
+      approvalController.cancelAllPending('Allow Control disabled', (item) => item.kind === 'control_action');
+      setInputPermissionError(null);
+    }
+  }, [localSettings.allowControlEnabled]);
+
+  useEffect(() => {
+    if (!localSettings.screenPreviewEnabled) {
+      approvalController.cancelAllPending('Screen Preview disabled', (item) =>
+        item.kind === 'ai_proposal' || item.kind === 'tool_call'
+      );
+    }
+  }, [localSettings.screenPreviewEnabled]);
+
+  useEffect(() => {
+    if (!workspaceState.configured) {
+      approvalController.cancelAllPending('Workspace cleared', (item) => item.kind === 'tool_call');
+    }
+  }, [workspaceState.configured]);
+
+  useEffect(() => {
+    if (aiState?.status === 'paused') {
+      approvalController.cancelAllPending('AI Assist paused', (item) =>
+        item.kind === 'ai_proposal' || item.kind === 'tool_call'
+      );
+    }
+  }, [aiState?.status]);
 
   // Start AI Assist mode
   const startAiAssist = async (runId: string, goal: string) => {
@@ -552,36 +847,48 @@ function App() {
 
   // Handle action approval
   const handleActionApprove = useCallback(async () => {
-    if (!pendingAction || !client) return;
-    
-    const { actionId, action } = pendingAction;
-    
-    // Send approved ack
-    client.sendActionAck(actionId, 'approved');
-    
-    // Execute the action
-    const result = await executeAction(action);
-    
+    const approval = getNextPendingApproval(approvalItems, 'control_action');
+    if (!approval) {
+      return;
+    }
+
+    const payload = controlApprovalPayloadsRef.current.get(approval.id);
+    const activeClient = clientRef.current;
+    if (!payload || !activeClient) {
+      return;
+    }
+
+    if (!controlEnabledRef.current) {
+      approvalController.cancel(approval.id, 'Allow Control disabled');
+      return;
+    }
+
+    approvalController.approve(approval.id);
+    approvalController.markExecuting(approval.id);
+    activeClient.sendActionAck(payload.actionId, 'approved');
+
+    const result = await executeAction(payload.action);
     if (!result.ok) {
       setInputPermissionError(result.error?.message || 'Input injection failed');
+      if (result.error?.permissionTarget) {
+        notePermissionIssue(result.error.permissionTarget, result.error.message);
+      }
+      approvalController.markFailed(approval.id, result.error?.code || 'EXECUTION_FAILED');
+    } else {
+      setInputPermissionError(null);
+      approvalController.markExecuted(approval.id);
     }
-    
-    // Send result
-    client.sendActionResult(actionId, result.ok, result.error);
-    
-    setPendingAction(null);
-  }, [pendingAction, client]);
+
+    activeClient.sendActionResult(payload.actionId, result.ok, result.error);
+  }, [approvalItems, notePermissionIssue]);
 
   const handleActionDeny = useCallback(() => {
-    if (!pendingAction || !client) return;
-    
-    const { actionId } = pendingAction;
-    
-    client.sendActionAck(actionId, 'denied');
-    client.sendActionResult(actionId, false, { code: 'DENIED_BY_USER', message: 'User denied the action' });
-    
-    setPendingAction(null);
-  }, [pendingAction, client]);
+    const approval = getNextPendingApproval(approvalItems, 'control_action');
+    if (!approval) {
+      return;
+    }
+    approvalController.deny(approval.id, 'Denied by user');
+  }, [approvalItems]);
 
   const handleControlToggle = useCallback((enabled: boolean) => {
     setSetting('allowControlEnabled', enabled);
@@ -592,6 +899,9 @@ function App() {
 
   const handleScreenPreviewToggle = useCallback((enabled: boolean) => {
     setSetting('screenPreviewEnabled', enabled);
+    if (!enabled) {
+      aiControllerRef.current?.pause();
+    }
   }, []);
 
   const handleStartMinimizedChange = useCallback((enabled: boolean) => {
@@ -618,30 +928,76 @@ function App() {
   }, []);
 
   // Handle AI Assist action approval
-  const handleAiApproveAction = useCallback(() => {
-    aiController?.approveAction();
-  }, [aiController]);
-
-  const handleAiRejectAction = useCallback(() => {
-    aiController?.rejectAction();
-  }, [aiController]);
-
-  const handleAiApproveTool = useCallback(() => {
-    if (!workspaceState.configured) {
+  const handleAiApproveAction = useCallback(async () => {
+    const approval = getNextPendingApproval(approvalItems, 'ai_proposal');
+    if (!approval || !aiControllerRef.current) {
       return;
     }
-    aiController?.approveTool();
-  }, [aiController, workspaceState.configured]);
+
+    approvalController.approve(approval.id);
+    approvalController.markExecuting(approval.id);
+    const result = await aiControllerRef.current.approveAction();
+    if (result.ok) {
+      approvalController.markExecuted(approval.id);
+      return;
+    }
+
+    if (result.error && (result.error.includes('Accessibility') || result.error.includes('permission'))) {
+      notePermissionIssue('accessibility', result.error);
+    }
+    approvalController.markFailed(approval.id, 'EXECUTION_FAILED');
+  }, [approvalItems, notePermissionIssue]);
+
+  const handleAiRejectAction = useCallback(() => {
+    const approval = getNextPendingApproval(approvalItems, 'ai_proposal');
+    if (!approval) {
+      return;
+    }
+    approvalController.deny(approval.id, 'Denied by user');
+  }, [approvalItems]);
+
+  const handleAiApproveTool = useCallback(async () => {
+    const approval = getNextPendingApproval(approvalItems, 'tool_call');
+    if (!approval) {
+      return;
+    }
+
+    if (!workspaceState.configured) {
+      approvalController.cancel(approval.id, 'Workspace cleared');
+      return;
+    }
+
+    if (!aiControllerRef.current) {
+      return;
+    }
+
+    approvalController.approve(approval.id);
+    approvalController.markExecuting(approval.id);
+    const result = await aiControllerRef.current.approveTool();
+    if (result.ok) {
+      approvalController.markExecuted(approval.id);
+      return;
+    }
+
+    approvalController.markFailed(approval.id, 'EXECUTION_FAILED');
+  }, [approvalItems, workspaceState.configured]);
 
   const handleAiRejectTool = useCallback(() => {
-    aiController?.rejectTool();
-  }, [aiController]);
+    const approval = getNextPendingApproval(approvalItems, 'tool_call');
+    if (!approval) {
+      return;
+    }
+    approvalController.deny(approval.id, 'Denied by user');
+  }, [approvalItems]);
 
   const handleAiUserResponse = useCallback((response: string) => {
     aiController?.userResponse(response);
   }, [aiController]);
 
   const handleStopAi = useCallback(() => {
+    approvalController.cancelAllPending('AI Assist stopped', (item) =>
+      item.kind === 'ai_proposal' || item.kind === 'tool_call'
+    );
     aiController?.stop('User stopped');
     if (activeRun) {
       client?.sendRunUpdate(activeRun.runId, 'canceled', 'AI Assist stopped by user');
@@ -651,6 +1007,23 @@ function App() {
     setAiState(null);
     setCurrentProposal(undefined);
   }, [aiController, activeRun, client]);
+
+  const handleStopAll = useCallback(() => {
+    const confirmed = window.confirm(
+      'Stop all pending approvals, pause AI Assist, and disable screen preview plus remote control?'
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    aiControllerRef.current?.pause();
+    approvalController.cancelAllPending('Stop all requested');
+    updateSettings({
+      allowControlEnabled: false,
+      screenPreviewEnabled: false,
+    });
+    setInputPermissionError(null);
+  }, []);
 
   const handleWorkspaceChange = useCallback((state: LocalWorkspaceState) => {
     setWorkspaceState(state);
@@ -665,12 +1038,18 @@ function App() {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  const isAiAssist = activeRun?.mode === 'ai_assist';
-  const activeToolHistory = activeRun ? toolHistoryByRun[activeRun.runId] || [] : [];
+  const pendingControlApproval = getNextPendingApproval(approvalItems, 'control_action');
+  const pendingControlPayload = pendingControlApproval
+    ? controlApprovalPayloadsRef.current.get(pendingControlApproval.id) || null
+    : null;
+  const pendingAiProposalApproval = getNextPendingApproval(approvalItems, 'ai_proposal');
+  const pendingToolApproval = getNextPendingApproval(approvalItems, 'tool_call');
   const pendingToolProposal =
-    currentProposal?.kind === 'propose_tool' && aiState?.status === 'awaiting_approval'
+    pendingToolApproval && currentProposal?.kind === 'propose_tool' && aiState?.status === 'awaiting_approval'
       ? currentProposal
       : null;
+  const isAiAssist = activeRun?.mode === 'ai_assist';
+  const activeToolHistory = activeRun ? toolHistoryByRun[activeRun.runId] || [] : [];
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#f5f5f5', display: 'flex' }}>
@@ -678,21 +1057,55 @@ function App() {
       <div style={{ flex: 1, padding: '1.5rem', overflow: 'auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h1>AI Operator Desktop</h1>
-          <button
-            onClick={() => setSettingsOpen(true)}
-            style={{
-              padding: '0.5rem 1rem',
-              background: '#f3f4f6',
-              border: '1px solid #d1d5db',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              fontSize: '0.875rem',
-            }}
-          >
-            ⚙️ Settings
-          </button>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button
+              onClick={handleStopAll}
+              disabled={approvalItems.every((item) => item.state !== 'pending') && !aiState?.isRunning}
+              style={{
+                padding: '0.5rem 1rem',
+                background: '#ef4444',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '0.875rem',
+                opacity: approvalItems.every((item) => item.state !== 'pending') && !aiState?.isRunning ? 0.5 : 1,
+              }}
+            >
+              Stop All
+            </button>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              style={{
+                padding: '0.5rem 1rem',
+                background: '#f3f4f6',
+                border: '1px solid #d1d5db',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '0.875rem',
+              }}
+            >
+              ⚙️ Settings
+            </button>
+          </div>
         </div>
         <p>Device ID: <code>{deviceId}</code></p>
+
+        {runtimeConfigError && (
+          <div
+            style={{
+              marginTop: '1rem',
+              padding: '0.75rem',
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              borderRadius: '6px',
+              fontSize: '0.875rem',
+              color: '#991b1b',
+            }}
+          >
+            <strong>Connection blocked:</strong> {runtimeConfigError}
+          </div>
+        )}
         
         {/* Connection Status */}
         <div style={{ marginTop: '1rem', display: 'flex', gap: '1rem', alignItems: 'center' }}>
@@ -712,8 +1125,8 @@ function App() {
             Workspace: {workspaceState.configured ? workspaceState.rootName || 'Configured' : 'Not set'}
           </span>
           
-          {status === 'disconnected' && (
-            <button onClick={() => client?.connect(WS_URL)}>
+          {status === 'disconnected' && runtimeConfig && (
+            <button onClick={() => client?.connect(runtimeConfig.wsUrl)}>
               Reconnect
             </button>
           )}
@@ -732,6 +1145,22 @@ function App() {
             }}
           >
             {trayNotice}
+          </div>
+        )}
+
+        {diagnosticsStatus && (
+          <div
+            style={{
+              marginTop: '1rem',
+              padding: '0.75rem',
+              background: '#ecfdf5',
+              border: '1px solid #86efac',
+              borderRadius: '6px',
+              fontSize: '0.875rem',
+              color: '#166534',
+            }}
+          >
+            {diagnosticsStatus}
           </div>
         )}
 
@@ -807,6 +1236,9 @@ function App() {
             enabled={localSettings.screenPreviewEnabled}
             onToggle={handleScreenPreviewToggle}
             onDisplayChange={setPrimaryDisplayId}
+            permissionStatus={permissionStatus}
+            onOpenPermissionSettings={handleOpenPermissionSettings}
+            onPermissionIssue={(message) => notePermissionIssue('screenRecording', message)}
           />
         )}
 
@@ -836,6 +1268,22 @@ function App() {
             <strong>Permission Required:</strong> {inputPermissionError.includes('Accessibility') 
               ? 'Accessibility permission is needed for remote control. Enable it in System Settings > Privacy & Security > Accessibility for this app.'
               : inputPermissionError}
+            <div style={{ marginTop: '0.75rem' }}>
+              <button
+                onClick={() => void handleOpenPermissionSettings('accessibility')}
+                style={{
+                  padding: '0.5rem 0.75rem',
+                  backgroundColor: '#92400e',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '0.75rem',
+                }}
+              >
+                Open Accessibility Settings
+              </button>
+            </div>
           </div>
         )}
 
@@ -863,6 +1311,7 @@ function App() {
             isAiAssist={isAiAssist}
             aiState={aiState?.status}
             currentProposal={currentProposal}
+            currentApproval={pendingAiProposalApproval}
             actionCount={activeRun?.actionCount}
             maxActions={activeRun?.constraints?.maxActions}
             onApproveAction={handleAiApproveAction}
@@ -905,17 +1354,19 @@ function App() {
       )}
 
       {/* Action Approval Modal */}
-      {pendingAction && (
+      {pendingControlApproval && pendingControlPayload && (
         <ActionApprovalModal
-          actionId={pendingAction.actionId}
-          action={pendingAction.action}
+          approval={pendingControlApproval}
+          actionId={pendingControlPayload.actionId}
+          action={pendingControlPayload.action}
           onApprove={handleActionApprove}
           onDeny={handleActionDeny}
         />
       )}
 
-      {pendingToolProposal && workspaceState.configured && (
+      {pendingToolProposal && pendingToolApproval && workspaceState.configured && (
         <ToolApprovalModal
+          approval={pendingToolApproval}
           toolCall={pendingToolProposal.toolCall}
           rationale={pendingToolProposal.rationale}
           onApprove={handleAiApproveTool}
@@ -937,6 +1388,16 @@ function App() {
           onScreenPreviewToggle={handleScreenPreviewToggle}
           onAllowControlToggle={handleControlToggle}
           onWorkspaceChange={handleWorkspaceChange}
+          apiHttpBase={runtimeConfig?.httpBase || null}
+          runtimeConfigError={runtimeConfigError}
+          permissionStatus={permissionStatus}
+          permissionStatusBusy={permissionStatusBusy}
+          onRefreshPermissionStatus={refreshPermissionStatus}
+          onOpenPermissionSettings={handleOpenPermissionSettings}
+          permissionHintTarget={permissionHintTarget}
+          permissionHintMessage={permissionHintMessage}
+          onExportDiagnostics={handleExportDiagnostics}
+          diagnosticsStatus={diagnosticsStatus}
         />
       )}
     </div>

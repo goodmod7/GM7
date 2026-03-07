@@ -34,6 +34,9 @@ import { evaluateReadiness } from './lib/readiness.js';
 import { getAppVersion, getVersionDriftWarnings } from './lib/version.js';
 import { getPresence } from './lib/presence.js';
 import { recoverInProgressRunsOnStartup } from './lib/run-recovery.js';
+import { redact } from './lib/redact.js';
+import { startRetentionScheduler } from './lib/retention.js';
+import { createSecurityOnSendHook, DEFAULT_JSON_BODY_LIMIT, WEBHOOK_RAW_BODY_LIMIT } from './lib/security.js';
 import {
   counterLabelsFromRateLimitKey,
   incCounter,
@@ -63,6 +66,7 @@ import {
 } from './lib/auth.js';
 
 const fastify = Fastify({
+  bodyLimit: DEFAULT_JSON_BODY_LIMIT,
   logger: {
     level: config.LOG_LEVEL,
     redact: {
@@ -70,6 +74,11 @@ const fastify = Fastify({
         'req.headers.authorization',
         'req.headers.cookie',
         'req.headers["x-admin-api-key"]',
+        'req.body.password',
+        'req.body.token',
+        'req.body.accessToken',
+        'req.body.refreshToken',
+        'req.body.csrfToken',
         'res.headers["set-cookie"]',
       ],
       remove: true,
@@ -121,15 +130,7 @@ fastify.addHook('onRequest', async (request, reply) => {
   (request as FastifyRequest & { startedAt?: bigint }).startedAt = process.hrtime.bigint();
 });
 
-fastify.addHook('onSend', async (_request, reply) => {
-  reply.header('x-content-type-options', 'nosniff');
-  reply.header('referrer-policy', 'no-referrer');
-  reply.header('x-frame-options', 'DENY');
-  reply.header('permissions-policy', 'accelerometer=(), camera=(), geolocation=(), microphone=(), payment=(), usb=()');
-  if (config.NODE_ENV === 'production') {
-    reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
-  }
-});
+fastify.addHook('onSend', createSecurityOnSendHook({ nodeEnv: config.NODE_ENV }));
 
 fastify.addHook('preHandler', async (request, reply) => {
   if (!shouldCheckCsrf(request)) {
@@ -589,7 +590,7 @@ setSSEBroadcast((event) => {
     try {
       client.reply.raw.write(`data: ${data}\n\n`);
     } catch (err) {
-      fastify.log.warn({ clientId, err }, 'Failed to send SSE to client, removing');
+      fastify.log.warn({ clientId, err: redact(err) }, 'Failed to send SSE to client, removing');
       sseClients.delete(clientId);
     }
   }
@@ -644,6 +645,16 @@ const recoveredRuns = await recoverInProgressRunsOnStartup(config.RUN_RECOVERY_P
 if (recoveredRuns > 0) {
   fastify.log.warn({ recoveredRuns, policy: config.RUN_RECOVERY_POLICY }, 'Recovered in-progress runs after restart');
 }
+
+const stopRetentionScheduler = startRetentionScheduler({
+  nodeEnv: config.NODE_ENV,
+  prismaClient: prisma,
+  logger: fastify.log,
+  auditRetentionDays: config.AUDIT_RETENTION_DAYS,
+  stripeEventRetentionDays: config.STRIPE_EVENT_RETENTION_DAYS,
+  sessionRetentionDays: config.SESSION_RETENTION_DAYS,
+  runRetentionDays: config.RUN_RETENTION_DAYS,
+});
 
 // ============================================================================
 // Health Check
@@ -1019,7 +1030,10 @@ fastify.post('/billing/portal', async (request, reply) => {
   return { url: session.url };
 });
 
-fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, reply) => {
+fastify.post('/billing/webhook', {
+  config: { rawBody: true },
+  bodyLimit: WEBHOOK_RAW_BODY_LIMIT,
+}, async (request, reply) => {
   if (!(await enforceHttpRateLimit(reply, `ip:${request.ip}:billing:webhook`, config.BILLING_PER_MIN, 60_000))) {
     return;
   }
@@ -1038,7 +1052,7 @@ fastify.post('/billing/webhook', { config: { rawBody: true } }, async (request, 
     event = stripe.webhooks.constructEvent(rawBody, signature, config.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     incCounter('stripe_webhook_failures_total', metricLabels({ reason: 'invalid_signature' }));
-    fastify.log.warn({ err }, 'Stripe webhook signature verification failed');
+    fastify.log.warn({ err: redact(err) }, 'Stripe webhook signature verification failed');
     reply.status(400);
     return { error: 'Invalid signature' };
   }
@@ -1662,13 +1676,14 @@ try {
   await fastify.listen({ port: config.PORT, host: '0.0.0.0' });
   fastify.log.info(`API server listening on port ${config.PORT}`);
 } catch (err) {
-  fastify.log.error(err);
+  fastify.log.error({ err: redact(err) }, 'API server failed to start');
   process.exit(1);
 }
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
   fastify.log.info('Shutting down gracefully...');
+  stopRetentionScheduler?.();
   deviceStore.markAllDisconnected();
   
   for (const [, client] of sseClients) {
@@ -1686,6 +1701,7 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   fastify.log.info('Shutting down gracefully...');
+  stopRetentionScheduler?.();
   deviceStore.markAllDisconnected();
   
   for (const [, client] of sseClients) {

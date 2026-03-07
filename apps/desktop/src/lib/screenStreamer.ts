@@ -19,6 +19,7 @@ export interface CaptureResult {
 export interface CaptureError {
   message: string;
   needsPermission: boolean;
+  permissionTarget?: 'screenRecording';
 }
 
 export interface ScreenStreamerOptions {
@@ -165,7 +166,10 @@ export class ScreenStreamer {
     } catch (e) {
       const error = e as CaptureError;
       console.error('[ScreenStreamer] Capture failed:', error.message);
-      this.options.onError?.(error);
+      this.options.onError?.({
+        ...error,
+        permissionTarget: error.needsPermission ? 'screenRecording' : undefined,
+      });
       
       // Stop streaming on permission error
       if (error.needsPermission) {

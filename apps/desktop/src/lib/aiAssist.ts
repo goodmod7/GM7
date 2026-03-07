@@ -27,6 +27,7 @@ export interface AiAssistState {
   isRunning: boolean;
   status: 'idle' | 'capturing' | 'thinking' | 'awaiting_approval' | 'executing' | 'asking_user' | 'paused' | 'done' | 'error';
   actionCount: number;
+  currentProposalId?: string;
   currentProposal?: AgentProposal;
   lastError?: string;
   logs: LogLine[];
@@ -51,6 +52,11 @@ export interface LocalToolEvent extends ToolSummary {
 type ToolResult = 
   | { ok: true; data?: unknown }
   | { ok: false; error: { code: string; message: string } };
+
+interface ExecutionResult {
+  ok: boolean;
+  error?: string;
+}
 
 // Helper function to check if LLM provider is configured
 export async function hasLlMProviderConfigured(provider: string): Promise<boolean> {
@@ -94,15 +100,15 @@ export class AiAssistController {
   // ============================================================================
 
   // Called when user approves a proposed tool
-  async approveTool(): Promise<void> {
+  async approveTool(): Promise<ExecutionResult> {
     if (this.state.status !== 'awaiting_approval' || !this.state.currentProposal) {
       console.warn('[AiAssist] Cannot approve - not awaiting approval');
-      return;
+      return { ok: false, error: 'Not awaiting approval' };
     }
 
     if (this.state.currentProposal.kind !== 'propose_tool') {
       console.warn('[AiAssist] Cannot approve - not a tool proposal');
-      return;
+      return { ok: false, error: 'Current proposal is not a tool request' };
     }
 
     this.state.status = 'executing';
@@ -207,12 +213,16 @@ export class AiAssistController {
         this.state.status = 'asking_user';
         this.options.onProposal?.(this.state.currentProposal);
         this.notifyStateChange();
-        return;
+        return { ok: true };
       }
 
       // Continue to next iteration
       this.state.status = 'capturing';
+      this.state.currentProposal = undefined;
+      this.state.currentProposalId = undefined;
       this.notifyStateChange();
+      this.resumeLoop();
+      return { ok: true };
       
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Tool execution failed';
@@ -256,6 +266,7 @@ export class AiAssistController {
       this.state.status = 'asking_user';
       this.options.onProposal?.(this.state.currentProposal);
       this.notifyStateChange();
+      return { ok: false, error: errorMsg };
     }
   }
 
@@ -403,6 +414,8 @@ export class AiAssistController {
     
     this.state.isRunning = false;
     this.state.status = 'idle';
+    this.state.currentProposal = undefined;
+    this.state.currentProposalId = undefined;
     this.notifyStateChange();
 
     this.log('info', `AI Assist stopped: ${reason}`);
@@ -437,15 +450,15 @@ export class AiAssistController {
   }
 
   // Called when user approves a proposed action
-  async approveAction(): Promise<void> {
+  async approveAction(): Promise<ExecutionResult> {
     if (this.state.status !== 'awaiting_approval' || !this.state.currentProposal) {
       console.warn('[AiAssist] Cannot approve - not awaiting approval');
-      return;
+      return { ok: false, error: 'Not awaiting approval' };
     }
 
     if (this.state.currentProposal.kind !== 'propose_action') {
       console.warn('[AiAssist] Cannot approve - not an action proposal');
-      return;
+      return { ok: false, error: 'Current proposal is not an action request' };
     }
 
     this.state.status = 'executing';
@@ -493,13 +506,16 @@ export class AiAssistController {
         this.state.status = 'asking_user';
         this.options.onProposal?.(this.state.currentProposal);
         this.notifyStateChange();
-        return;
+        return { ok: true };
       }
 
       // Continue to next iteration
       this.state.status = 'capturing';
+      this.state.currentProposal = undefined;
+      this.state.currentProposalId = undefined;
       this.notifyStateChange();
       this.resumeLoop();
+      return { ok: true };
       
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Execution failed';
@@ -523,37 +539,43 @@ export class AiAssistController {
       this.state.status = 'asking_user';
       this.options.onProposal?.(this.state.currentProposal);
       this.notifyStateChange();
+      return { ok: false, error: errorMsg };
     }
   }
 
   // Called when user rejects a proposed action
   rejectAction(): void {
-    if (this.state.status !== 'awaiting_approval') return;
-
-    this.log('info', 'User rejected action proposal');
-    this.options.wsClient.sendRunLog(this.options.runId, 'User rejected action proposal', 'info');
-
-    // Add note to history and ask again
-    this.actionResults.push('User rejected previous proposal');
-
-    this.state.status = 'capturing';
-    this.state.currentProposal = undefined;
-    this.notifyStateChange();
-    this.resumeLoop();
+    this.dismissPendingProposal('User rejected action proposal');
   }
 
   rejectTool(): void {
-    if (this.state.status !== 'awaiting_approval' || this.state.currentProposal?.kind !== 'propose_tool') {
+    this.dismissPendingProposal('User rejected tool proposal');
+  }
+
+  dismissPendingProposal(reason: string, resume: boolean = true): void {
+    const isProposalPending =
+      this.state.currentProposal?.kind === 'propose_action' || this.state.currentProposal?.kind === 'propose_tool';
+
+    if (!isProposalPending) {
       return;
     }
 
-    this.log('info', 'User rejected tool proposal');
-    this.options.wsClient.sendRunLog(this.options.runId, 'User rejected tool proposal', 'info');
+    this.log('info', reason);
+    this.options.wsClient.sendRunLog(this.options.runId, reason, 'info');
+    this.actionResults.push(reason);
 
-    this.actionResults.push('User rejected previous tool proposal');
+    this.state.currentProposal = undefined;
+    this.state.currentProposalId = undefined;
+
+    if (!resume) {
+      if (this.paused) {
+        this.state.status = 'paused';
+      }
+      this.notifyStateChange();
+      return;
+    }
 
     this.state.status = 'capturing';
-    this.state.currentProposal = undefined;
     this.notifyStateChange();
     this.resumeLoop();
   }
@@ -581,6 +603,7 @@ export class AiAssistController {
     this.actionResults.push(`User said: ${response}`);
     this.state.status = 'capturing';
     this.state.currentProposal = undefined;
+    this.state.currentProposalId = undefined;
     this.notifyStateChange();
     this.resumeLoop();
   }
@@ -619,6 +642,7 @@ export class AiAssistController {
 
         const proposal = await this.getLlmProposal(settings, screenshot);
         this.state.currentProposal = proposal;
+        this.state.currentProposalId = crypto.randomUUID();
 
         // Handle different proposal types
         switch (proposal.kind) {
@@ -806,6 +830,8 @@ export class AiAssistController {
   private setError(message: string): void {
     this.state.lastError = message;
     this.state.status = 'error';
+    this.state.currentProposal = undefined;
+    this.state.currentProposalId = undefined;
     this.paused = false;
     this.notifyStateChange();
     this.options.onError?.(message);

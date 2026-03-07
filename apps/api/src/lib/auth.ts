@@ -216,11 +216,13 @@ export function shouldCheckCsrf(request: FastifyRequest): boolean {
     return false;
   }
 
-  if (request.url.startsWith('/auth/')) {
+  const path = request.url.split('?')[0];
+
+  if (path === '/auth/login' || path === '/auth/register') {
     return false;
   }
 
-  if (request.url.startsWith('/billing/webhook')) {
+  if (path === '/billing/webhook') {
     return false;
   }
 
@@ -228,7 +230,7 @@ export function shouldCheckCsrf(request: FastifyRequest): boolean {
     return false;
   }
 
-  return Boolean(getAccessCookieToken(request));
+  return Boolean(getAccessCookieToken(request) || getRefreshCookieToken(request));
 }
 
 export function isValidCsrf(request: FastifyRequest): boolean {

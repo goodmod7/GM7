@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { RunWithSteps, AgentProposal, InputAction, ToolCall } from '@ai-operator/shared';
+import type { ApprovalItem } from '../lib/approvals.js';
 import type { LocalToolEvent } from '../lib/aiAssist.js';
 
 interface RunPanelProps {
@@ -9,6 +10,7 @@ interface RunPanelProps {
   isAiAssist?: boolean;
   aiState?: 'idle' | 'capturing' | 'thinking' | 'awaiting_approval' | 'executing' | 'asking_user' | 'paused' | 'done' | 'error';
   currentProposal?: AgentProposal;
+  currentApproval?: ApprovalItem | null;
   actionCount?: number;
   maxActions?: number;
   onApproveAction?: () => void;
@@ -28,6 +30,7 @@ export function RunPanel({
   isAiAssist,
   aiState,
   currentProposal,
+  currentApproval,
   actionCount,
   maxActions,
   onApproveAction,
@@ -78,7 +81,7 @@ export function RunPanel({
   const summarizeAction = (action: InputAction): string => {
     switch (action.kind) {
       case 'type':
-        return `Type "${action.text.substring(0, 20)}${action.text.length > 20 ? '...' : ''}" (${action.text.length} chars)`;
+        return `Type (${action.text.length} chars)`;
       case 'click':
         return `Click at (${(action.x * 100).toFixed(0)}%, ${(action.y * 100).toFixed(0)}%)`;
       case 'double_click':
@@ -229,6 +232,11 @@ export function RunPanel({
               {currentProposal.confidence !== undefined && (
                 <div style={{ marginBottom: '0.75rem', fontSize: '0.75rem', color: '#78350f' }}>
                   Confidence: {Math.round(currentProposal.confidence * 100)}%
+                </div>
+              )}
+              {currentApproval && (
+                <div style={{ marginBottom: '0.75rem', fontSize: '0.75rem', color: '#78350f' }}>
+                  State: {currentApproval.state} • expires at {new Date(currentApproval.expiresAt).toLocaleTimeString()}
                 </div>
               )}
               {aiState === 'awaiting_approval' && (

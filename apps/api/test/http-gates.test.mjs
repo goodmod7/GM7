@@ -74,6 +74,8 @@ async function withServer(run) {
     return { ok: true, userId: user.id };
   });
 
+  app.post('/auth/refresh', async () => ({ ok: true }));
+
   app.post('/runs', async (request, reply) => {
     const user = await requireAuth(request, reply);
     if (!user) {
@@ -139,6 +141,22 @@ test('cookie-authenticated mutation requires CSRF header', async () => {
       url: '/mutation',
       headers: {
         Cookie: `access_token=${accessToken}; csrf_token=csrf-cookie-value`,
+      },
+    });
+
+    assert.equal(response.statusCode, 403);
+    const payload = JSON.parse(response.body);
+    assert.equal(payload.code, 'CSRF_REQUIRED');
+  });
+});
+
+test('refresh route requires CSRF when authenticated via refresh cookie', async () => {
+  await withServer(async (app) => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/auth/refresh',
+      headers: {
+        Cookie: 'refresh_token=refresh-cookie-value; csrf_token=csrf-cookie-value',
       },
     });
 

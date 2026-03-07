@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::process::Command;
+use std::sync::Mutex;
 
 // Workspace state - stored in memory, reset on app restart
 pub static WORKSPACE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -85,6 +85,22 @@ pub fn workspace_get_state() -> WorkspaceState {
             configured: false,
             root_name: None,
         },
+    }
+}
+
+#[tauri::command]
+pub async fn workspace_select_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let selection = app.dialog().file().blocking_pick_folder();
+    match selection {
+        Some(path) => {
+            let path_buf = path
+                .into_path()
+                .map_err(|invalid| format!("Selected path is not local: {:?}", invalid))?;
+            Ok(Some(path_buf.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
     }
 }
 

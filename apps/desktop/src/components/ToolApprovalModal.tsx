@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ToolCall } from '@ai-operator/shared';
+import type { ApprovalItem } from '../lib/approvals.js';
 
 interface ToolApprovalModalProps {
+  approval: ApprovalItem;
   toolCall: ToolCall;
   rationale: string;
   onApprove: () => void;
@@ -41,9 +43,19 @@ function getToolDetails(toolCall: ToolCall): {
   }
 }
 
-export function ToolApprovalModal({ toolCall, rationale, onApprove, onDeny }: ToolApprovalModalProps) {
+export function ToolApprovalModal({ approval, toolCall, rationale, onApprove, onDeny }: ToolApprovalModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [remainingMs, setRemainingMs] = useState(() => Math.max(0, approval.expiresAt - Date.now()));
   const details = getToolDetails(toolCall);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRemainingMs(Math.max(0, approval.expiresAt - Date.now()));
+    }, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [approval.expiresAt]);
 
   const handleApprove = () => {
     setIsSubmitting(true);
@@ -97,6 +109,9 @@ export function ToolApprovalModal({ toolCall, rationale, onApprove, onDeny }: To
             }}
           >
             Tool Request
+          </div>
+          <div style={{ marginBottom: '0.5rem', fontSize: '0.75rem', color: '#1d4ed8' }}>
+            {approval.risk.toUpperCase()} risk • expires in {Math.ceil(remainingMs / 1000)}s
           </div>
           <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600 }}>{details.title}</h2>
         </div>

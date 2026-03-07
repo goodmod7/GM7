@@ -7,6 +7,8 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use enigo::{Enigo, MouseControllable, KeyboardControllable, Key as EnigoKey, MouseButton as EnigoMouseButton};
+use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
+use tauri_plugin_opener::OpenerExt;
 
 mod llm;
 mod workspace;
@@ -40,6 +42,131 @@ struct CaptureError {
 struct InputError {
     message: String,
     needs_permission: bool,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PermissionState {
+    Granted,
+    Denied,
+    Unknown,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionStatusPayload {
+    screen_recording: PermissionState,
+    accessibility: PermissionState,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PermissionTarget {
+    ScreenRecording,
+    Accessibility,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+}
+
+fn is_permission_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("permission") || lower.contains("denied") || lower.contains("screen recording")
+}
+
+fn detect_screen_recording_status() -> PermissionState {
+    #[cfg(target_os = "macos")]
+    {
+        match screenshots::Screen::all() {
+            Ok(screens) => {
+                let Some(screen) = screens.first() else {
+                    return PermissionState::Unknown;
+                };
+                match screen.capture() {
+                    Ok(_) => PermissionState::Granted,
+                    Err(err) => {
+                        let message = err.to_string();
+                        if is_permission_error(&message) {
+                            PermissionState::Denied
+                        } else {
+                            PermissionState::Unknown
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                let message = err.to_string();
+                if is_permission_error(&message) {
+                    PermissionState::Denied
+                } else {
+                    PermissionState::Unknown
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        PermissionState::Unknown
+    }
+}
+
+fn detect_accessibility_status() -> PermissionState {
+    #[cfg(target_os = "macos")]
+    {
+        if unsafe { AXIsProcessTrusted() } {
+            PermissionState::Granted
+        } else {
+            PermissionState::Denied
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        PermissionState::Unknown
+    }
+}
+
+fn open_permission_settings_url(app: &AppHandle, url: &str) -> Result<(), String> {
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("Failed to open settings: {}", e))
+}
+
+fn open_permission_settings_impl(app: &AppHandle, target: PermissionTarget) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let preferred = match target {
+            PermissionTarget::ScreenRecording => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            PermissionTarget::Accessibility => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
+        };
+
+        open_permission_settings_url(app, preferred)
+            .or_else(|_| open_permission_settings_url(app, "x-apple.systempreferences:com.apple.preference.security?Privacy"))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let target_url = match target {
+            PermissionTarget::ScreenRecording => "ms-settings:privacy",
+            PermissionTarget::Accessibility => "ms-settings:easeofaccess-keyboard",
+        };
+        open_permission_settings_url(app, target_url)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = app;
+        let _ = target;
+        Ok(())
+    }
 }
 
 // List all available displays
@@ -309,6 +436,70 @@ fn device_token_account(device_id: &str) -> String {
     format!("device_token::{}", device_id)
 }
 
+fn is_local_dev_host(host: Option<&str>) -> bool {
+    matches!(host, Some("localhost" | "127.0.0.1"))
+}
+
+fn is_allowed_webview_url(url: &tauri::Url) -> bool {
+    if url.scheme() == "tauri" {
+        return true;
+    }
+
+    if url.host_str() == Some("tauri.localhost") {
+        return true;
+    }
+
+    cfg!(dev) && matches!(url.scheme(), "http" | "https") && is_local_dev_host(url.host_str())
+}
+
+fn app_base_host() -> Option<String> {
+    std::env::var("APP_BASE_URL")
+        .ok()
+        .and_then(|value| tauri::Url::parse(&value).ok())
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+}
+
+fn is_allowed_external_url(url: &tauri::Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+
+    let Some(host) = url.host_str().map(|value| value.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    if host == "stripe.com" || host.ends_with(".stripe.com") {
+        return true;
+    }
+
+    if host == "github.com" || host.ends_with(".github.com") {
+        return true;
+    }
+
+    app_base_host()
+        .map(|allowed_host| host == allowed_host)
+        .unwrap_or(false)
+}
+
+fn create_main_window(app: &AppHandle) -> Result<(), tauri::Error> {
+    let window_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+        .or_else(|| app.config().app.windows.first().cloned())
+        .expect("main window config missing");
+
+    WebviewWindowBuilder::from_config(app, &window_config)?
+        .on_navigation(|url| is_allowed_webview_url(url))
+        .on_new_window(|_url, _features| NewWindowResponse::Deny)
+        .build()?;
+
+    Ok(())
+}
+
 fn create_autolaunch() -> Result<auto_launch::AutoLaunch, String> {
     let current_exe = std::env::current_exe()
         .map_err(|e| format!("Failed to resolve current executable: {}", e))?;
@@ -454,6 +645,53 @@ fn main_window_hide(app: AppHandle, runtime: State<'_, TrayRuntimeState>) -> Key
     let _ = refresh_tray_menu(&app, &guard.clone());
 
     KeyResult { ok: true, error: None }
+}
+
+#[tauri::command]
+fn permissions_get_status() -> PermissionStatusPayload {
+    PermissionStatusPayload {
+        screen_recording: detect_screen_recording_status(),
+        accessibility: detect_accessibility_status(),
+    }
+}
+
+#[tauri::command]
+fn permissions_open_settings(app: AppHandle, target: PermissionTarget) -> KeyResult {
+    match open_permission_settings_impl(&app, target) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(error) => KeyResult {
+            ok: false,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn open_external_url(app: AppHandle, url: String) -> KeyResult {
+    let parsed = match tauri::Url::parse(&url) {
+        Ok(value) => value,
+        Err(e) => {
+            return KeyResult {
+                ok: false,
+                error: Some(format!("Invalid URL: {}", e)),
+            }
+        }
+    };
+
+    if !is_allowed_external_url(&parsed) {
+        return KeyResult {
+            ok: false,
+            error: Some("External URL blocked by desktop allowlist".to_string()),
+        };
+    }
+
+    match app.opener().open_url(parsed.as_str(), None::<&str>) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(e) => KeyResult {
+            ok: false,
+            error: Some(format!("Failed to open URL: {}", e)),
+        },
+    }
 }
 
 #[tauri::command]
@@ -710,7 +948,7 @@ mod base64 {
 pub fn run() {
     tauri::Builder::default()
         .manage(TrayRuntimeState::default())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
@@ -727,6 +965,9 @@ pub fn run() {
             tray_update_state,
             main_window_show,
             main_window_hide,
+            permissions_get_status,
+            permissions_open_settings,
+            open_external_url,
             autostart_supported,
             autostart_is_enabled,
             autostart_set_enabled,
@@ -738,13 +979,17 @@ pub fn run() {
             // Iteration 7: Workspace Tools
             workspace::workspace_configure,
             workspace::workspace_get_state,
+            workspace::workspace_select_directory,
             workspace::workspace_clear,
             workspace::tool_execute,
         ])
         .setup(|app| {
+            let app_handle = app.app_handle();
+            create_main_window(&app_handle)?;
+
             let runtime = app.state::<TrayRuntimeState>();
             let initial_state = runtime.menu.lock().unwrap().clone();
-            let tray_menu = build_tray_menu(&app.app_handle(), &initial_state)?;
+            let tray_menu = build_tray_menu(&app_handle, &initial_state)?;
 
             TrayIconBuilder::with_id("main-tray")
                 .menu(&tray_menu)

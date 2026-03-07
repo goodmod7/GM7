@@ -18,8 +18,18 @@ if (mode === 'prod') {
     process.exit(1);
   }
 
+  if (prodCsp.includes('*')) {
+    console.error('Desktop CSP check failed: production CSP must not contain wildcard sources');
+    process.exit(1);
+  }
+
   if (prodCsp.includes("'unsafe-eval'")) {
     console.error('Desktop CSP check failed: production CSP must not include unsafe-eval');
+    process.exit(1);
+  }
+
+  if (prodCsp.includes('http://') || prodCsp.includes('ws://')) {
+    console.error('Desktop CSP check failed: production CSP must not allow insecure HTTP or WS origins');
     process.exit(1);
   }
 

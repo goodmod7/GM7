@@ -32,6 +32,7 @@ import { screenStore } from '../store/screen.js';
 import { actionStore } from '../store/actions.js';
 import { toolStore } from '../store/tools.js';
 import { createRunEngine } from '../engine/runEngine.js';
+import { redact } from './redact.js';
 import { redactToolCallForLogs } from './tool-redaction.js';
 import { devicesRepo } from '../repos/devices.js';
 import { auditRepo } from '../repos/audit.js';
@@ -323,7 +324,7 @@ function handleSocketConnection(
         }
 
         void handleDeviceMessage(socket, message, fastify).catch((err) => {
-          fastify.log.error({ err }, 'Failed to process device message');
+          fastify.log.error({ err: redact(err) }, 'Failed to process device message');
           const errorMsg = createServerMessage('server.error', {
             code: ErrorCode.INTERNAL_ERROR,
             message: 'Failed to process message',
@@ -331,7 +332,7 @@ function handleSocketConnection(
           socket.send(JSON.stringify(errorMsg));
         });
       } catch (err) {
-        fastify.log.error({ err }, 'Failed to process WebSocket message');
+        fastify.log.error({ err: redact(err) }, 'Failed to process WebSocket message');
         const errorMsg = createServerMessage('server.error', {
           code: ErrorCode.INVALID_MESSAGE,
           message: 'Failed to parse message',
@@ -359,7 +360,7 @@ function handleSocketConnection(
     });
 
     socket.on('error', (err: Error) => {
-      fastify.log.error({ err, connectionId, clientIp }, 'WebSocket error');
+      fastify.log.error({ err: redact(err), connectionId, clientIp }, 'WebSocket error');
     });
 }
 

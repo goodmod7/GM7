@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { InputAction } from '@ai-operator/shared';
+import type { ApprovalItem } from '../lib/approvals.js';
 
 // Use actionId in the component to satisfy lint
 function useActionId(actionId: string): void {
@@ -7,17 +8,28 @@ function useActionId(actionId: string): void {
 }
 
 interface ActionApprovalModalProps {
+  approval: ApprovalItem;
   actionId: string;
   action: InputAction;
   onApprove: () => void;
   onDeny: () => void;
 }
 
-export function ActionApprovalModal({ actionId, action, onApprove, onDeny }: ActionApprovalModalProps) {
+export function ActionApprovalModal({ approval, actionId, action, onApprove, onDeny }: ActionApprovalModalProps) {
   // Mark as used
   useActionId(actionId);
   
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [remainingMs, setRemainingMs] = useState(() => Math.max(0, approval.expiresAt - Date.now()));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setRemainingMs(Math.max(0, approval.expiresAt - Date.now()));
+    }, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [approval.expiresAt]);
 
   const handleApprove = () => {
     setIsSubmitting(true);
@@ -109,6 +121,9 @@ export function ActionApprovalModal({ actionId, action, onApprove, onDeny }: Act
             }}
           >
             Action Request
+          </div>
+          <div style={{ marginBottom: '0.5rem', fontSize: '0.75rem', color: '#92400e' }}>
+            {approval.risk.toUpperCase()} risk • expires in {Math.ceil(remainingMs / 1000)}s
           </div>
           <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 600 }}>
             {desc.title}

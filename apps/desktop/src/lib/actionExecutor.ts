@@ -3,7 +3,7 @@ import type { InputAction } from '@ai-operator/shared';
 
 export interface ActionResult {
   ok: boolean;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; permissionTarget?: 'accessibility' };
 }
 
 export async function executeAction(action: InputAction): Promise<ActionResult> {
@@ -65,6 +65,7 @@ export async function executeAction(action: InputAction): Promise<ActionResult> 
       error: {
         code: needsPermission ? 'PERMISSION_DENIED' : 'EXECUTION_FAILED',
         message: msg,
+        permissionTarget: needsPermission ? 'accessibility' : undefined,
       },
     };
   }

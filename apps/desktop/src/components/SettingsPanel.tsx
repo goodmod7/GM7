@@ -1,14 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 import {
   clearWorkspace,
   configureWorkspace,
   getWorkspaceState,
+  selectWorkspaceDirectory,
   type LocalWorkspaceState,
 } from '../lib/workspace.js';
 import type { LocalSettingsState } from '../lib/localSettings.js';
+import {
+  getPermissionInstructions,
+  type NativePermissionStatus,
+  type PermissionTarget,
+} from '../lib/permissions.js';
 
 export interface LlmSettings {
   provider: 'openai';
@@ -18,7 +23,6 @@ export interface LlmSettings {
 
 export type WorkspaceState = LocalWorkspaceState;
 
-const API_HTTP_BASE = import.meta.env.VITE_API_HTTP_BASE || 'http://localhost:3001';
 const UPDATER_ENABLED = import.meta.env.VITE_DESKTOP_UPDATER_ENABLED === 'true';
 
 interface SettingsPanelProps {
@@ -33,6 +37,16 @@ interface SettingsPanelProps {
   onScreenPreviewToggle: (enabled: boolean) => void;
   onAllowControlToggle: (enabled: boolean) => void;
   onWorkspaceChange?: (state: WorkspaceState) => void;
+  apiHttpBase: string | null;
+  runtimeConfigError?: string | null;
+  permissionStatus: NativePermissionStatus;
+  permissionStatusBusy?: boolean;
+  onRefreshPermissionStatus: () => void | Promise<void>;
+  onOpenPermissionSettings: (target: PermissionTarget) => void | Promise<void>;
+  permissionHintTarget?: PermissionTarget | null;
+  permissionHintMessage?: string | null;
+  onExportDiagnostics: () => void | Promise<void>;
+  diagnosticsStatus?: string | null;
 }
 
 export function SettingsPanel({
@@ -47,6 +61,16 @@ export function SettingsPanel({
   onScreenPreviewToggle,
   onAllowControlToggle,
   onWorkspaceChange,
+  apiHttpBase,
+  runtimeConfigError,
+  permissionStatus,
+  permissionStatusBusy = false,
+  onRefreshPermissionStatus,
+  onOpenPermissionSettings,
+  permissionHintTarget,
+  permissionHintMessage,
+  onExportDiagnostics,
+  diagnosticsStatus,
 }: SettingsPanelProps) {
   const [settings, setSettings] = useState<LlmSettings>({
     provider: 'openai',
@@ -62,6 +86,8 @@ export function SettingsPanel({
   // Workspace state
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState>({ configured: false });
   const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
+  const screenRecordingInstructions = getPermissionInstructions('screenRecording');
+  const accessibilityInstructions = getPermissionInstructions('accessibility');
 
   // Load settings from localStorage on mount
   useEffect(() => {
@@ -96,11 +122,7 @@ export function SettingsPanel({
   const handleChooseWorkspace = async () => {
     setIsLoadingWorkspace(true);
     try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Select Workspace Folder',
-      });
+      const selected = await selectWorkspaceDirectory();
       
       if (selected && typeof selected === 'string') {
         const newState = await configureWorkspace(selected);
@@ -247,9 +269,13 @@ export function SettingsPanel({
         return;
       }
 
+      if (!apiHttpBase) {
+        throw new Error(runtimeConfigError || 'Desktop API configuration is invalid. Refusing to check updates.');
+      }
+
       const target = await detectUpdateTarget();
       const response = await fetch(
-        `${API_HTTP_BASE}/updates/desktop/${target.platform}/${target.arch}/${encodeURIComponent(target.currentVersion)}.json`
+        `${apiHttpBase}/updates/desktop/${target.platform}/${target.arch}/${encodeURIComponent(target.currentVersion)}.json`
       );
 
       if (!response.ok) {
@@ -675,6 +701,161 @@ export function SettingsPanel({
           </label>
         </div>
 
+        {/* Permissions Section */}
+        <div style={{ marginBottom: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e5e7eb' }}>
+          <h3 style={{ margin: '0 0 1rem', fontSize: '1rem', color: '#333' }}>
+            🔐 Permissions
+          </h3>
+          <p style={{ margin: '0 0 1rem', fontSize: '0.875rem', color: '#666' }}>
+            Screen preview depends on Screen Recording permission. Remote control depends on Accessibility permission.
+          </p>
+
+          <div
+            style={{
+              padding: '0.75rem',
+              backgroundColor: '#f9fafb',
+              border: '1px solid #e5e7eb',
+              borderRadius: '6px',
+              marginBottom: '1rem',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <div style={{ fontSize: '0.875rem', fontWeight: 500, color: '#333' }}>Screen Recording</div>
+              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: permissionStatus.screenRecording === 'granted' ? '#166534' : permissionStatus.screenRecording === 'denied' ? '#991b1b' : '#92400e' }}>
+                {permissionStatus.screenRecording}
+              </span>
+            </div>
+            <div style={{ fontSize: '0.75rem', color: '#666', lineHeight: 1.5 }}>
+              {screenRecordingInstructions.map((step) => (
+                <div key={step}>{step}</div>
+              ))}
+            </div>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+              <button
+                onClick={() => {
+                  void onOpenPermissionSettings('screenRecording');
+                }}
+                style={{
+                  padding: '0.5rem 0.75rem',
+                  backgroundColor: '#111827',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '0.75rem',
+                }}
+              >
+                Open Screen Recording Settings
+              </button>
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: '0.75rem',
+              backgroundColor: '#f9fafb',
+              border: '1px solid #e5e7eb',
+              borderRadius: '6px',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+              <div style={{ fontSize: '0.875rem', fontWeight: 500, color: '#333' }}>Accessibility</div>
+              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: permissionStatus.accessibility === 'granted' ? '#166534' : permissionStatus.accessibility === 'denied' ? '#991b1b' : '#92400e' }}>
+                {permissionStatus.accessibility}
+              </span>
+            </div>
+            <div style={{ fontSize: '0.75rem', color: '#666', lineHeight: 1.5 }}>
+              {accessibilityInstructions.map((step) => (
+                <div key={step}>{step}</div>
+              ))}
+            </div>
+            <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+              <button
+                onClick={() => {
+                  void onOpenPermissionSettings('accessibility');
+                }}
+                style={{
+                  padding: '0.5rem 0.75rem',
+                  backgroundColor: '#111827',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '0.75rem',
+                }}
+              >
+                Open Accessibility Settings
+              </button>
+              <button
+                onClick={() => {
+                  void onRefreshPermissionStatus();
+                }}
+                disabled={permissionStatusBusy}
+                style={{
+                  padding: '0.5rem 0.75rem',
+                  backgroundColor: 'white',
+                  color: '#374151',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '4px',
+                  cursor: permissionStatusBusy ? 'not-allowed' : 'pointer',
+                  fontSize: '0.75rem',
+                }}
+              >
+                {permissionStatusBusy ? 'Refreshing...' : 'Refresh Status'}
+              </button>
+            </div>
+          </div>
+
+          {permissionHintTarget && permissionHintMessage && (
+            <div
+              style={{
+                marginTop: '1rem',
+                padding: '0.75rem',
+                backgroundColor: '#fef2f2',
+                border: '1px solid #fecaca',
+                borderRadius: '4px',
+                fontSize: '0.875rem',
+                color: '#991b1b',
+              }}
+            >
+              Recent issue for <strong>{permissionHintTarget}</strong>: {permissionHintMessage}
+            </div>
+          )}
+        </div>
+
+        {/* Diagnostics Section */}
+        <div style={{ marginBottom: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e5e7eb' }}>
+          <h3 style={{ margin: '0 0 1rem', fontSize: '1rem', color: '#333' }}>
+            🧪 Diagnostics
+          </h3>
+          <p style={{ margin: '0 0 1rem', fontSize: '0.875rem', color: '#666' }}>
+            Export a redacted support snapshot containing the last 50 approval records and current native permission status.
+          </p>
+          <button
+            onClick={() => {
+              void onExportDiagnostics();
+            }}
+            style={{
+              width: '100%',
+              padding: '0.75rem',
+              backgroundColor: '#111827',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '0.875rem',
+              fontWeight: 500,
+            }}
+          >
+            Export Diagnostics
+          </button>
+          {diagnosticsStatus && (
+            <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem', color: '#166534' }}>
+              {diagnosticsStatus}
+            </p>
+          )}
+        </div>
+
         {/* Updates Section */}
         <div style={{ marginBottom: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #e5e7eb' }}>
           <h3 style={{ margin: '0 0 1rem', fontSize: '1rem', color: '#333' }}>
@@ -683,19 +864,34 @@ export function SettingsPanel({
           <p style={{ margin: '0 0 1rem', fontSize: '0.875rem', color: '#666' }}>
             Signed release builds are configured to use the Tauri updater feed. In development, updater checks can be disabled.
           </p>
+          {runtimeConfigError && (
+            <div
+              style={{
+                marginBottom: '1rem',
+                padding: '0.75rem',
+                backgroundColor: '#fef2f2',
+                border: '1px solid #fecaca',
+                borderRadius: '4px',
+                fontSize: '0.875rem',
+                color: '#991b1b',
+              }}
+            >
+              {runtimeConfigError}
+            </div>
+          )}
           <button
             onClick={() => {
               void handleCheckForUpdates();
             }}
-            disabled={isLoading}
+            disabled={isLoading || !apiHttpBase}
             style={{
               width: '100%',
               padding: '0.75rem',
-              backgroundColor: isLoading ? '#d1d5db' : '#111827',
+              backgroundColor: isLoading || !apiHttpBase ? '#d1d5db' : '#111827',
               color: 'white',
               border: 'none',
               borderRadius: '4px',
-              cursor: isLoading ? 'not-allowed' : 'pointer',
+              cursor: isLoading || !apiHttpBase ? 'not-allowed' : 'pointer',
               fontSize: '0.875rem',
               fontWeight: 500,
             }}

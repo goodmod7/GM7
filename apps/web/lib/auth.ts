@@ -65,9 +65,16 @@ function shouldAttemptRefresh(path: string): boolean {
 }
 
 async function refreshSession(): Promise<boolean> {
+  const headers = new Headers();
+  const csrfToken = getCsrfToken();
+  if (csrfToken) {
+    headers.set('x-csrf-token', csrfToken);
+  }
+
   const response = await fetch(`${API_BASE}/auth/refresh`, {
     method: 'POST',
     credentials: 'include',
+    headers,
   });
   return response.ok;
 }

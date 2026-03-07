@@ -35,6 +35,7 @@ pnpm format
 ```
 
 For production-like local deployment (Docker + migrations + readiness + monitoring), see [docs/deploying.md](/workspaces/GM7/docs/deploying.md).
+For the production threat model, remote-control guardrails, and secrets guidance, see [docs/security.md](/workspaces/GM7/docs/security.md).
 
 ## Development
 
@@ -117,19 +118,36 @@ The `/download` page is subscription-gated. It reads release metadata from the A
 # VITE_API_HTTP_BASE=http://localhost:3001
 # VITE_DESKTOP_UPDATER_ENABLED=false
 # VITE_DESKTOP_UPDATER_PUBLIC_KEY=your_tauri_updater_public_key
+# VITE_DESKTOP_ALLOW_INSECURE_LOCALHOST=true   # only for local debug packaging
 
 pnpm --filter desktop dev
 # Or for Tauri:
 pnpm --filter desktop tauri:dev
 ```
 
+Packaged production desktop builds must use `https://` for `VITE_API_HTTP_BASE` and `wss://` for `VITE_API_WS_URL`. `VITE_DESKTOP_ALLOW_INSECURE_LOCALHOST=true` exists only for local debug packaging and should not be used for real production distribution.
+
 Desktop auto-update is configured through the API updater feed at `/updates/desktop/...`. In `DESKTOP_RELEASE_SOURCE=file` mode, the API serves stub manifests from `apps/api/updates`. In `DESKTOP_RELEASE_SOURCE=github` mode, it builds the updater response dynamically from GitHub Release assets and `.sig` files.
 
 The desktop app now runs as an always-on tray agent. Closing the window hides it to the system tray instead of exiting. Use the tray menu to show the app again or choose `Quit` to fully exit. Screen preview and remote control remain opt-in and can be toggled from the tray or the desktop UI.
 
+Desktop privileged work is approval-gated locally:
+- every control action, tool call, and AI proposal enters an explicit approval state machine
+- pending approvals expire after 60 seconds by default
+- `Stop All` cancels pending approvals, pauses AI assist, and turns off the local control/screen-preview toggles
+- local diagnostics export is redacted and excludes typed text, terminal args, file contents, tokens, and raw LLM keys
+
+macOS operator onboarding:
+- grant **Screen Recording** if you want live screen preview/capture
+- grant **Accessibility** if you want input injection for remote control
+- use the in-app Settings > Permissions buttons to open the relevant System Settings panels
+- if the desktop reports `unknown`, reproduce the failing action once and follow the permission guidance banner shown in-app
+
 The Settings panel includes:
 - `Start minimized to tray`
 - `Launch at startup` (best-effort in dev, supported on macOS and Windows packaged builds)
+- `Permissions` status for Screen Recording and Accessibility, with direct settings shortcuts
+- `Export Diagnostics` for a redacted support bundle of recent approval and permission state
 
 ### Desktop Development
 
@@ -145,6 +163,7 @@ That command runs:
 - `tauri build --debug`
 
 CI now compiles the desktop app on both macOS and Windows for pull requests and pushes to `main`, so Rust/Tauri regressions fail before release tags.
+Desktop security config is also checked with `pnpm check:desktop:security`, which validates CSP, capability allowlists, and the audited Rust command surface.
 
 ### Stripe + Desktop Release Dev Notes
 
@@ -187,9 +206,11 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod --profile edge --
 ### Required Production Environment
 
 - `WEB_ORIGIN` must match the deployed web origin(s) used by browsers.
+- `APP_BASE_URL` and `WEB_ORIGIN` must use `https://` in production unless `ALLOW_INSECURE_DEV=true` is explicitly set.
 - `JWT_SECRET` must be strong and unique per environment.
 - `ADMIN_API_KEY` must be set to protect `/admin/health` and `/metrics`.
 - If billing is enabled, Stripe envs are required: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`.
+- Retention controls default to `AUDIT_RETENTION_DAYS=30`, `STRIPE_EVENT_RETENTION_DAYS=30`, `SESSION_RETENTION_DAYS=30`, and `RUN_RETENTION_DAYS=90`.
 
 ### Operational Checks
 

@@ -56,6 +56,13 @@ export async function getWorkspaceState(): Promise<LocalWorkspaceState> {
 }
 
 /**
+ * Ask the native shell to choose a workspace directory.
+ */
+export async function selectWorkspaceDirectory(): Promise<string | null> {
+  return await invoke<string | null>('workspace_select_directory');
+}
+
+/**
  * Clear workspace configuration
  */
 export async function clearWorkspace(): Promise<LocalWorkspaceState> {

@@ -6,6 +6,8 @@ This document describes a production-ready MVP deployment for:
 - Postgres
 - Redis
 
+For provider-specific deployment using Render for the API and Vercel for the web app, see [docs/deploy-render-vercel.md](/workspaces/GM7/docs/deploy-render-vercel.md).
+
 ## Supported Topology
 
 Recommended MVP topology:

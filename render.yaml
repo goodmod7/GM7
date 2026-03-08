@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ai-operator-api
+    runtime: docker
+    dockerContext: .
+    dockerfilePath: apps/api/Dockerfile
+    healthCheckPath: /ready
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEPLOYMENT_MODE
+        value: single_instance
+      - key: RATE_LIMIT_BACKEND
+        value: redis
+      - key: METRICS_PUBLIC
+        value: "false"
+      - key: BILLING_ENABLED
+        value: "false"
+      - key: DESKTOP_RELEASE_SOURCE
+        value: github
+      - key: DESKTOP_RELEASE_TAG
+        value: v0.1.0-beta.1

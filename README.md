@@ -188,6 +188,7 @@ Desktop security config is also checked with `pnpm check:desktop:security`, whic
 ## Production Deployment
 
 Full deployment guide: [docs/deploying.md](/workspaces/GM7/docs/deploying.md)
+Render + Vercel guide: [docs/deploy-render-vercel.md](/workspaces/GM7/docs/deploy-render-vercel.md)
 
 ### Prod-Like Docker Compose Quickstart
 

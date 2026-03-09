@@ -1,3 +1,4 @@
+[[permission]]
 identifier = "desktop-ipc"
 description = "Allows the main desktop window to invoke the audited application IPC commands."
 

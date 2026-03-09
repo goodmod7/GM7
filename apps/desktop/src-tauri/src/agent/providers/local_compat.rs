@@ -47,7 +47,7 @@ impl LocalCompatProvider {
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": format!("data:image/png;base64,{", img_b64)
+                            "url": format!("data:image/png;base64,{}", img_b64)
                         }
                     }
                 ]

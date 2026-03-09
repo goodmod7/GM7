@@ -77,7 +77,7 @@ impl LlmProvider for OpenAiProvider {
             
             user_content.push(OpenAiContent::ImageUrl {
                 image_url: ImageUrl {
-                    url: format!("data:image/png;base64,{", clean_b64),
+                    url: format!("data:image/png;base64,{}", clean_b64),
                 },
             });
         }

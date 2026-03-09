@@ -46,7 +46,7 @@ impl OpenAiProvider {
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": format!("data:image/png;base64,{", img_b64),
+                            "url": format!("data:image/png;base64,{}", img_b64),
                             "detail": "high"
                         }
                     }
@@ -67,7 +67,7 @@ impl OpenAiProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request_body)
             .send()
             .await

@@ -1,5 +1,6 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001';
 const CSRF_COOKIE_NAME = 'csrf_token';
+const ACCESS_TOKEN_STORAGE_KEY = 'ai_operator_access_token';
 let lastRateLimitNoticeAt = 0;
 
 export interface SessionUser {
@@ -33,6 +34,54 @@ export interface DesktopDownloadInfo {
 
 interface ApiFetchOptions extends RequestInit {
   retryOnAuthFailure?: boolean;
+}
+
+function getBrowserStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function getStoredAccessToken(): string | null {
+  const storage = getBrowserStorage();
+  if (!storage) {
+    return null;
+  }
+
+  try {
+    const token = storage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+    return token?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function storeAccessToken(token: string | null): void {
+  const storage = getBrowserStorage();
+  if (!storage) {
+    return;
+  }
+
+  try {
+    if (token && token.trim()) {
+      storage.setItem(ACCESS_TOKEN_STORAGE_KEY, token.trim());
+      return;
+    }
+
+    storage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+  } catch {
+    // Ignore storage access failures in locked-down browser contexts.
+  }
+}
+
+function clearStoredAccessToken(): void {
+  storeAccessToken(null);
 }
 
 function shouldSetJsonContentType(init: RequestInit): boolean {
@@ -99,12 +148,30 @@ function notifyRateLimit(): void {
   window.alert('Rate limit exceeded, retry later');
 }
 
+export function buildApiUrl(path: string, options: { includeAccessTokenQuery?: boolean } = {}): string {
+  const url = new URL(path, API_BASE);
+
+  if (options.includeAccessTokenQuery) {
+    const token = getStoredAccessToken();
+    if (token) {
+      url.searchParams.set('token', token);
+    }
+  }
+
+  return url.toString();
+}
+
 export async function apiFetch(path: string, init: ApiFetchOptions = {}): Promise<Response> {
   const { retryOnAuthFailure = true, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
+  const accessToken = getStoredAccessToken();
 
   if (!headers.has('Content-Type') && shouldSetJsonContentType(requestInit)) {
     headers.set('Content-Type', 'application/json');
+  }
+
+  if (accessToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${accessToken}`);
   }
 
   if (isMutation(requestInit.method)) {
@@ -114,7 +181,7 @@ export async function apiFetch(path: string, init: ApiFetchOptions = {}): Promis
     }
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(buildApiUrl(path), {
     ...requestInit,
     headers,
     credentials: 'include',
@@ -127,6 +194,9 @@ export async function apiFetch(path: string, init: ApiFetchOptions = {}): Promis
   ) {
     const refreshed = await refreshSession();
     if (!refreshed) {
+      if (accessToken) {
+        clearStoredAccessToken();
+      }
       redirectToLogin();
       return response;
     }
@@ -147,6 +217,7 @@ export async function apiFetch(path: string, init: ApiFetchOptions = {}): Promis
 export async function getMe(): Promise<SessionUser | null> {
   const response = await apiFetch('/auth/me');
   if (response.status === 401) {
+    clearStoredAccessToken();
     return null;
   }
 
@@ -169,28 +240,40 @@ export async function login(email: string, password: string): Promise<SessionUse
     throw new Error(data.error || 'Login failed');
   }
 
+  if (typeof data.token === 'string' && data.token.trim()) {
+    storeAccessToken(data.token);
+  }
+
   return data.user as SessionUser;
 }
 
 export async function logout(): Promise<void> {
-  const response = await apiFetch('/auth/logout', {
-    method: 'POST',
-  });
-  const data = await response.json().catch(() => ({ error: 'Logout failed' }));
+  try {
+    const response = await apiFetch('/auth/logout', {
+      method: 'POST',
+    });
+    const data = await response.json().catch(() => ({ error: 'Logout failed' }));
 
-  if (!response.ok) {
-    throw new Error(data.error || 'Logout failed');
+    if (!response.ok) {
+      throw new Error(data.error || 'Logout failed');
+    }
+  } finally {
+    clearStoredAccessToken();
   }
 }
 
 export async function logoutAllSessions(): Promise<void> {
-  const response = await apiFetch('/auth/logout_all', {
-    method: 'POST',
-  });
-  const data = await response.json().catch(() => ({ error: 'Logout all failed' }));
+  try {
+    const response = await apiFetch('/auth/logout_all', {
+      method: 'POST',
+    });
+    const data = await response.json().catch(() => ({ error: 'Logout all failed' }));
 
-  if (!response.ok) {
-    throw new Error(data.error || 'Logout all failed');
+    if (!response.ok) {
+      throw new Error(data.error || 'Logout all failed');
+    }
+  } finally {
+    clearStoredAccessToken();
   }
 }
 

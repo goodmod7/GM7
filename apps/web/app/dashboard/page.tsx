@@ -3,9 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { apiFetch, getBillingStatus, getMe, getSessions, logout, logoutAllSessions, type BillingStatus, type BrowserSession } from '../../lib/auth';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:3001';
+import { apiFetch, buildApiUrl, getBillingStatus, getMe, getSessions, logout, logoutAllSessions, type BillingStatus, type BrowserSession } from '../../lib/auth';
 
 interface Device {
   deviceId: string;
@@ -276,7 +274,7 @@ export default function Dashboard() {
 
     const setupSSE = () => {
       let opened = false;
-      const es = new EventSource(`${API_BASE}/events`, { withCredentials: true });
+      const es = new EventSource(buildApiUrl('/events', { includeAccessTokenQuery: true }), { withCredentials: true });
 
       es.onopen = () => {
         opened = true;
@@ -1369,7 +1367,9 @@ export default function Dashboard() {
             {previewDevice?.screenStreamState?.enabled ? (
               <div>
                 <img
-                  src={`${API_BASE}/devices/${previewDeviceId}/screen.png?ts=${screenTimestamp}`}
+                  src={buildApiUrl(`/devices/${previewDeviceId}/screen.png?ts=${screenTimestamp}`, {
+                    includeAccessTokenQuery: true,
+                  })}
                   alt="Screen preview"
                   onClick={hasActiveSubscription ? handleImageClick : undefined}
                   onWheel={hasActiveSubscription ? handleWheel : undefined}

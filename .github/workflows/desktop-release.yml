@@ -182,7 +182,7 @@ jobs:
 
       - name: Build Windows bundle
         shell: bash
-        run: pnpm --filter @ai-operator/desktop exec tauri build --bundles msi
+        run: pnpm --filter @ai-operator/desktop tauri:build --bundles msi
 
       - name: Normalize Windows asset names
         shell: pwsh
@@ -335,12 +335,12 @@ jobs:
       - name: Build macOS bundle for stable channel
         if: needs.prepare.outputs.channel == 'stable'
         shell: bash
-        run: pnpm --filter @ai-operator/desktop exec tauri build --config "$MACOS_TAURI_CONFIG" --bundles dmg
+        run: pnpm --filter @ai-operator/desktop tauri:build --config "$MACOS_TAURI_CONFIG" --bundles dmg
 
       - name: Build macOS bundle for beta channel
         if: needs.prepare.outputs.channel != 'stable'
         shell: bash
-        run: pnpm --filter @ai-operator/desktop exec tauri build --bundles dmg
+        run: pnpm --filter @ai-operator/desktop tauri:build --bundles dmg
 
       - name: Verify macOS app signature
         if: needs.prepare.outputs.channel == 'stable'

@@ -28,13 +28,14 @@ Keep the monorepo intact. Do not split the API and web apps into separate reposi
 2. Create the Render API service from the monorepo
 3. Add backend env vars on Render
 4. Deploy the Render API image
-5. Run the explicit migration step
-6. Verify `GET /health` and `GET /ready`
-7. Import the monorepo into Vercel with `apps/web` as Root Directory
-8. Set `NEXT_PUBLIC_API_BASE`
-9. Deploy the frontend
-10. Attach custom domains
-11. Test login, refresh/session behavior, dashboard, `/download`, and updater metadata
+5. Let the API startup path apply Prisma migrations automatically
+6. Optional: run the explicit migration step for controlled rollouts
+7. Verify `GET /health` and `GET /ready`
+8. Import the monorepo into Vercel with `apps/web` as Root Directory
+9. Set `NEXT_PUBLIC_API_BASE`
+10. Deploy the frontend
+11. Attach custom domains
+12. Test login, refresh/session behavior, dashboard, `/download`, and updater metadata
 
 Deploy the backend first so the frontend always points at a live API.
 
@@ -59,7 +60,8 @@ Treat those provider-default domains as bring-up URLs, not the preferred final a
 - Dockerfile path: `apps/api/Dockerfile`
 - Docker build context: `.`
 - Health check path: `/ready`
-- Separate migration step:
+- Startup behavior: runs `prisma migrate deploy` before starting the API
+- Optional explicit migration step:
 
 ```bash
 pnpm render:api:migrate

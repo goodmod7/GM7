@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node scripts/start-with-migrate.mjs",
+    "start:node": "node dist/index.js",
     "migrate:deploy": "prisma migrate deploy",
     "prisma:generate": "prisma generate",
     "retention:run-once": "tsx scripts/run-retention.ts",

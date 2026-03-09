@@ -17,22 +17,24 @@ Do not deploy the frontend on Render in this setup. `apps/web` stays on Vercel.
 
 The repo includes a root [render.yaml](/workspaces/GM7/render.yaml) that defines the Docker web service for the API.
 
-It intentionally keeps startup simple:
+It keeps the Render topology simple:
 
-- no startup migrations
+- startup runs `prisma migrate deploy` before the API process
 - no frontend service
 - `/ready` as the health check
 
 ## Migration Strategy
 
-Use a separate explicit migration step.
+The Docker startup path now runs `prisma migrate deploy` before booting the API. That removes the first-deploy failure mode where Render starts the container against an empty database.
+
+You can still use a separate explicit migration step when you want tighter rollout control.
 
 Recommended Render rollout flow:
 
 1. Create or sync the API service from `render.yaml`.
 2. Add environment variables.
 3. Trigger an image build/deploy.
-4. Run a one-off job against the API service image with:
+4. Optional but recommended for controlled rollouts: run a one-off job against the API service image with:
 
 ```bash
 pnpm render:api:migrate
@@ -44,11 +46,9 @@ Expanded command:
 pnpm --filter @ai-operator/api prisma:generate && pnpm --filter @ai-operator/api migrate:deploy
 ```
 
-5. After the migration succeeds, verify:
+5. After the deploy is healthy, verify:
    - `GET /health`
    - `GET /ready`
-
-Do not hide migrations inside the normal API startup path.
 
 ## Environment Variables
 

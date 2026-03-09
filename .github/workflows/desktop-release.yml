@@ -180,6 +180,9 @@ jobs:
       - name: Install dependencies
         run: pnpm -r install --frozen-lockfile
 
+      - name: Build shared package
+        run: pnpm --filter @ai-operator/shared build
+
       - name: Build Windows bundle
         shell: bash
         run: pnpm --filter @ai-operator/desktop tauri:build --bundles msi
@@ -288,6 +291,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm -r install --frozen-lockfile
+
+      - name: Build shared package
+        run: pnpm --filter @ai-operator/shared build
 
       - name: Import Developer ID certificate into temporary keychain
         if: needs.prepare.outputs.channel == 'stable'

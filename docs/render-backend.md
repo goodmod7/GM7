@@ -47,6 +47,7 @@ pnpm --filter @ai-operator/api prisma:generate && pnpm --filter @ai-operator/api
 ```
 
 5. After the deploy is healthy, verify:
+   - `GET /`
    - `GET /health`
    - `GET /ready`
 

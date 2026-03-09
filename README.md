@@ -76,6 +76,7 @@ REST endpoints:
 - `POST /billing/checkout` - Start Stripe Checkout for the subscription plan
 - `POST /billing/portal` - Open Stripe Customer Portal
 - `POST /billing/webhook` - Stripe webhook receiver
+- `GET /` - Service index with health/readiness links
 - `GET /downloads/desktop` - Subscription-gated desktop installer metadata
 - `GET /updates/desktop/:platform/:arch/:currentVersion.json` - Desktop updater manifest feed (stubbed in dev)
 - `GET /health` - Liveness endpoint (process up, no DB check)

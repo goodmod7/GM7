@@ -35,6 +35,7 @@ import { getAppVersion, getVersionDriftWarnings } from './lib/version.js';
 import { getPresence } from './lib/presence.js';
 import { recoverInProgressRunsOnStartup } from './lib/run-recovery.js';
 import { redact } from './lib/redact.js';
+import { registerRootRoute } from './lib/root-route.js';
 import { startRetentionScheduler } from './lib/retention.js';
 import { createSecurityOnSendHook, DEFAULT_JSON_BODY_LIMIT, WEBHOOK_RAW_BODY_LIMIT } from './lib/security.js';
 import { dispatchDeviceCommand, isDeviceCommandQueueEnabled } from './lib/device-commands.js';
@@ -670,6 +671,16 @@ const stopRetentionScheduler = startRetentionScheduler({
   stripeEventRetentionDays: config.STRIPE_EVENT_RETENTION_DAYS,
   sessionRetentionDays: config.SESSION_RETENTION_DAYS,
   runRetentionDays: config.RUN_RETENTION_DAYS,
+});
+
+// ============================================================================
+// Service Index
+// ============================================================================
+
+registerRootRoute(fastify, {
+  appVersion,
+  apiPublicBaseUrl: config.API_PUBLIC_BASE_URL,
+  nodeEnv: config.NODE_ENV,
 });
 
 // ============================================================================

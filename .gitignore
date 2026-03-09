@@ -46,3 +46,4 @@ apps/desktop/src/**/*.js
 apps/desktop/src/**/*.js.map
 apps/desktop/src/**/*.d.ts
 apps/desktop/src/**/*.d.ts.map
+!apps/desktop/src/vite-env.d.ts

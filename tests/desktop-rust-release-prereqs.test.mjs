@@ -56,6 +56,16 @@ test('desktop rust sources avoid the broken API usage that blocked CI', () => {
     !libRs.includes('mouse_double_click('),
     'desktop input injection should not call the unavailable Enigo mouse_double_click API',
   );
+
+  assert.ok(
+    !libRs.includes('delete_password()'),
+    'desktop keyring integration should use keyring v3 delete_credential() instead of removed delete_password()',
+  );
+
+  assert.ok(
+    libRs.includes('delete_credential()'),
+    'desktop keyring integration should delete stored credentials through delete_credential()',
+  );
 });
 
 test('advanced agent module exports the runtime type used by Tauri commands', () => {

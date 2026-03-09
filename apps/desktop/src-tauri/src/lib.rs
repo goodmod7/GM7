@@ -774,7 +774,7 @@ fn device_token_get(device_id: String) -> Option<String> {
 #[tauri::command]
 fn device_token_clear(device_id: String) -> KeyResult {
     match keyring_entry(&device_token_account(&device_id)) {
-        Ok(entry) => match entry.delete_password() {
+        Ok(entry) => match entry.delete_credential() {
             Ok(()) => KeyResult { ok: true, error: None },
             Err(e) => KeyResult {
                 ok: false,
@@ -815,7 +815,7 @@ fn has_llm_api_key(provider: String) -> bool {
 #[tauri::command]
 fn clear_llm_api_key(provider: String) -> KeyResult {
     match keyring_entry(&format!("llm_api_key:{}", provider)) {
-        Ok(entry) => match entry.delete_password() {
+        Ok(entry) => match entry.delete_credential() {
             Ok(()) => KeyResult { ok: true, error: None },
             Err(e) => KeyResult {
                 ok: false,

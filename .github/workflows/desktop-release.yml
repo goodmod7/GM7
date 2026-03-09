@@ -109,6 +109,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          VITE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.VITE_DESKTOP_UPDATER_PUBLIC_KEY }}
         run: |
           set -euo pipefail
 
@@ -155,6 +156,11 @@ jobs:
             exit 1
           fi
 
+          if [[ -z "${VITE_DESKTOP_UPDATER_PUBLIC_KEY:-}" ]]; then
+            echo "::error::Stable channel requires the VITE_DESKTOP_UPDATER_PUBLIC_KEY GitHub Actions variable."
+            exit 1
+          fi
+
   build-windows:
     runs-on: windows-latest
     needs:
@@ -162,6 +168,8 @@ jobs:
     env:
       VITE_API_HTTP_BASE: ${{ vars.VITE_API_HTTP_BASE }}
       VITE_API_WS_URL: ${{ vars.VITE_API_WS_URL }}
+      VITE_DESKTOP_UPDATER_ENABLED: ${{ needs.prepare.outputs.updater_enabled }}
+      VITE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.VITE_DESKTOP_UPDATER_PUBLIC_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -186,9 +194,37 @@ jobs:
       - name: Build shared package
         run: pnpm --filter @ai-operator/shared build
 
+      - name: Write Windows Tauri release config
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          set -euo pipefail
+
+          CONFIG_PATH="$RUNNER_TEMP/windows-tauri-release-config.json"
+
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            if [[ -z "${VITE_API_HTTP_BASE:-}" ]]; then
+              echo "::error::Stable desktop builds require the VITE_API_HTTP_BASE GitHub Actions variable."
+              exit 1
+            fi
+
+            if [[ -z "${VITE_DESKTOP_UPDATER_PUBLIC_KEY:-}" ]]; then
+              echo "::error::Stable desktop builds require the VITE_DESKTOP_UPDATER_PUBLIC_KEY GitHub Actions variable."
+              exit 1
+            fi
+
+            ENDPOINT="${VITE_API_HTTP_BASE%/}/updates/desktop/{{platform}}/{{arch}}/{{current_version}}.json"
+            node -e "const fs=require('fs'); const configPath=process.argv[1]; const endpoint=process.argv[2]; const pubkey=process.env.VITE_DESKTOP_UPDATER_PUBLIC_KEY; const config={plugins:{updater:{active:true,dialog:true,pubkey,endpoints:[endpoint]}}}; fs.writeFileSync(configPath, JSON.stringify(config, null, 2));" "$CONFIG_PATH" "$ENDPOINT"
+          else
+            node -e "const fs=require('fs'); const configPath=process.argv[1]; const config={plugins:{updater:{active:false,dialog:true}}}; fs.writeFileSync(configPath, JSON.stringify(config, null, 2));" "$CONFIG_PATH"
+          fi
+
+          printf 'WINDOWS_TAURI_CONFIG=%s\n' "$CONFIG_PATH" >> "$GITHUB_ENV"
+
       - name: Build Windows bundle
         shell: bash
-        run: pnpm --filter @ai-operator/desktop tauri:build --bundles msi
+        run: pnpm --filter @ai-operator/desktop tauri:build --config "$WINDOWS_TAURI_CONFIG" --bundles msi
 
       - name: Normalize Windows asset names
         shell: pwsh
@@ -277,6 +313,8 @@ jobs:
     env:
       VITE_API_HTTP_BASE: ${{ vars.VITE_API_HTTP_BASE }}
       VITE_API_WS_URL: ${{ vars.VITE_API_WS_URL }}
+      VITE_DESKTOP_UPDATER_ENABLED: ${{ needs.prepare.outputs.updater_enabled }}
+      VITE_DESKTOP_UPDATER_PUBLIC_KEY: ${{ vars.VITE_DESKTOP_UPDATER_PUBLIC_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -313,7 +351,6 @@ jobs:
 
           CERT_PATH="$RUNNER_TEMP/macos-release-signing.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/ai-operator-release.keychain-db"
-          CONFIG_PATH="$RUNNER_TEMP/macos-signing-config.json"
 
           printf '%s' "$MACOS_CERT_P12_BASE64" | base64 -D > "$CERT_PATH"
 
@@ -331,28 +368,44 @@ jobs:
             exit 1
           fi
 
-          cat > "$CONFIG_PATH" <<EOF
-          {
-            "bundle": {
-              "macOS": {
-                "signingIdentity": $(node -p "JSON.stringify(process.argv[1])" "$SIGNING_IDENTITY")
-              }
-            }
-          }
-          EOF
-
-          printf 'MACOS_TAURI_CONFIG=%s\n' "$CONFIG_PATH" >> "$GITHUB_ENV"
           printf 'MACOS_SIGNING_IDENTITY=%s\n' "$SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
-      - name: Build macOS bundle for stable channel
-        if: needs.prepare.outputs.channel == 'stable'
+      - name: Write macOS Tauri release config
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          set -euo pipefail
+
+          CONFIG_PATH="$RUNNER_TEMP/macos-tauri-release-config.json"
+
+          if [[ "$RELEASE_CHANNEL" == "stable" ]]; then
+            if [[ -z "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+              echo "::error::Stable macOS desktop builds require a resolved Developer ID signing identity."
+              exit 1
+            fi
+
+            if [[ -z "${VITE_API_HTTP_BASE:-}" ]]; then
+              echo "::error::Stable desktop builds require the VITE_API_HTTP_BASE GitHub Actions variable."
+              exit 1
+            fi
+
+            if [[ -z "${VITE_DESKTOP_UPDATER_PUBLIC_KEY:-}" ]]; then
+              echo "::error::Stable desktop builds require the VITE_DESKTOP_UPDATER_PUBLIC_KEY GitHub Actions variable."
+              exit 1
+            fi
+
+            ENDPOINT="${VITE_API_HTTP_BASE%/}/updates/desktop/{{platform}}/{{arch}}/{{current_version}}.json"
+            node -e "const fs=require('fs'); const configPath=process.argv[1]; const endpoint=process.argv[2]; const pubkey=process.env.VITE_DESKTOP_UPDATER_PUBLIC_KEY; const signingIdentity=process.env.MACOS_SIGNING_IDENTITY; const config={bundle:{macOS:{signingIdentity}},plugins:{updater:{active:true,dialog:true,pubkey,endpoints:[endpoint]}}}; fs.writeFileSync(configPath, JSON.stringify(config, null, 2));" "$CONFIG_PATH" "$ENDPOINT"
+          else
+            node -e "const fs=require('fs'); const configPath=process.argv[1]; const config={plugins:{updater:{active:false,dialog:true}}}; fs.writeFileSync(configPath, JSON.stringify(config, null, 2));" "$CONFIG_PATH"
+          fi
+
+          printf 'MACOS_TAURI_CONFIG=%s\n' "$CONFIG_PATH" >> "$GITHUB_ENV"
+
+      - name: Build macOS bundle
         shell: bash
         run: pnpm --filter @ai-operator/desktop tauri:build --config "$MACOS_TAURI_CONFIG" --bundles dmg
-
-      - name: Build macOS bundle for beta channel
-        if: needs.prepare.outputs.channel != 'stable'
-        shell: bash
-        run: pnpm --filter @ai-operator/desktop tauri:build --bundles dmg
 
       - name: Verify macOS app signature
         if: needs.prepare.outputs.channel == 'stable'

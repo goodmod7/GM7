@@ -44,6 +44,27 @@ test('desktop release config includes a tracked icon asset', () => {
   );
 });
 
+test('desktop base Tauri config keeps updater disabled until release workflow injects concrete values', () => {
+  const tauriConfig = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf8'));
+  const updaterConfig = tauriConfig.plugins?.updater;
+
+  assert.equal(
+    updaterConfig?.active,
+    false,
+    'desktop base Tauri config should keep updater inactive so beta builds cannot crash on unresolved release endpoints',
+  );
+
+  assert.ok(
+    !('pubkey' in (updaterConfig || {})),
+    'desktop base Tauri config should not embed an unresolved updater public key placeholder',
+  );
+
+  assert.ok(
+    !('endpoints' in (updaterConfig || {})),
+    'desktop base Tauri config should not embed unresolved updater endpoint placeholders',
+  );
+});
+
 test('desktop rust sources avoid the broken API usage that blocked CI', () => {
   const libRs = fs.readFileSync(libRsPath, 'utf8');
 

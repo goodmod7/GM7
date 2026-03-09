@@ -56,8 +56,8 @@ test('desktop base Tauri config keeps updater disabled until release workflow in
 
   assert.equal(
     tauriConfig.build?.beforeBuildCommand,
-    'pnpm --dir .. build',
-    'desktop Tauri release builds should invoke the desktop package build directly so Vite sees the intended desktop environment variables',
+    'pnpm build',
+    'desktop Tauri release builds should use a beforeBuildCommand that resolves to the desktop package from either the app root or src-tauri so CI does not depend on Tauri hook cwd quirks',
   );
 });
 

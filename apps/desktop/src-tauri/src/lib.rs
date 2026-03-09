@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
+    menu::{MenuBuilder, MenuEvent, MenuItemBuilder, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
@@ -225,19 +225,19 @@ fn capture_display_png(display_id: String, max_width: Option<u32>) -> Result<Cap
     
     let width = image.width();
     let height = image.height();
-    let rgba = image.rgba();
+    let rgba = image.into_raw();
     
     let (final_width, final_height, final_rgba) = if let Some(max_w) = max_width {
         if width > max_w {
             let ratio = max_w as f32 / width as f32;
             let new_height = (height as f32 * ratio) as u32;
-            let resized = resize_rgba(rgba, width, height, max_w, new_height);
+            let resized = resize_rgba(&rgba, width, height, max_w, new_height);
             (max_w, new_height, resized)
         } else {
-            (width, height, rgba.to_vec())
+            (width, height, rgba)
         }
     } else {
-        (width, height, rgba.to_vec())
+        (width, height, rgba)
     };
     
     let png_bytes = rgba_to_png(&final_rgba, final_width, final_height).map_err(|e| CaptureError {
@@ -317,7 +317,8 @@ fn input_double_click(x_norm: f64, y_norm: f64, button: String) -> Result<(), In
     };
     
     enigo.mouse_move_to(x, y);
-    enigo.mouse_double_click(mouse_button);
+    enigo.mouse_click(mouse_button);
+    enigo.mouse_click(mouse_button);
     
     Ok(())
 }
@@ -436,6 +437,11 @@ struct TrayStatePayload {
 
 fn device_token_account(device_id: &str) -> String {
     format!("device_token::{}", device_id)
+}
+
+fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new("ai-operator", account)
+        .map_err(|e| format!("Failed to access secure storage: {}", e))
 }
 
 fn is_local_dev_host(host: Option<&str>) -> bool {
@@ -743,60 +749,82 @@ fn autostart_set_enabled(enabled: bool) -> KeyResult {
 
 #[tauri::command]
 fn device_token_set(device_id: String, token: String) -> KeyResult {
-    let entry = keyring::Entry::new("ai-operator", &device_token_account(&device_id));
-    match entry.set_password(&token) {
-        Ok(()) => KeyResult { ok: true, error: None },
-        Err(e) => KeyResult {
+    match keyring_entry(&device_token_account(&device_id)) {
+        Ok(entry) => match entry.set_password(&token) {
+            Ok(()) => KeyResult { ok: true, error: None },
+            Err(e) => KeyResult {
+                ok: false,
+                error: Some(format!("Failed to store device token: {}", e)),
+            },
+        },
+        Err(error) => KeyResult {
             ok: false,
-            error: Some(format!("Failed to store device token: {}", e)),
+            error: Some(error),
         },
     }
 }
 
 #[tauri::command]
 fn device_token_get(device_id: String) -> Option<String> {
-    let entry = keyring::Entry::new("ai-operator", &device_token_account(&device_id));
-    entry.get_password().ok()
+    keyring_entry(&device_token_account(&device_id))
+        .ok()
+        .and_then(|entry| entry.get_password().ok())
 }
 
 #[tauri::command]
 fn device_token_clear(device_id: String) -> KeyResult {
-    let entry = keyring::Entry::new("ai-operator", &device_token_account(&device_id));
-    match entry.delete_password() {
-        Ok(()) => KeyResult { ok: true, error: None },
-        Err(e) => KeyResult {
+    match keyring_entry(&device_token_account(&device_id)) {
+        Ok(entry) => match entry.delete_password() {
+            Ok(()) => KeyResult { ok: true, error: None },
+            Err(e) => KeyResult {
+                ok: false,
+                error: Some(format!("Failed to clear device token: {}", e)),
+            },
+        },
+        Err(error) => KeyResult {
             ok: false,
-            error: Some(format!("Failed to clear device token: {}", e)),
+            error: Some(error),
         },
     }
 }
 
 #[tauri::command]
 fn set_llm_api_key(provider: String, key: String) -> KeyResult {
-    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider));
-    match entry.set_password(&key) {
-        Ok(()) => KeyResult { ok: true, error: None },
-        Err(e) => KeyResult {
+    match keyring_entry(&format!("llm_api_key:{}", provider)) {
+        Ok(entry) => match entry.set_password(&key) {
+            Ok(()) => KeyResult { ok: true, error: None },
+            Err(e) => KeyResult {
+                ok: false,
+                error: Some(format!("Failed to store key: {}", e)),
+            },
+        },
+        Err(error) => KeyResult {
             ok: false,
-            error: Some(format!("Failed to store key: {}", e)),
+            error: Some(error),
         },
     }
 }
 
 #[tauri::command]
 fn has_llm_api_key(provider: String) -> bool {
-    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider));
-    entry.get_password().is_ok()
+    keyring_entry(&format!("llm_api_key:{}", provider))
+        .map(|entry| entry.get_password().is_ok())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
 fn clear_llm_api_key(provider: String) -> KeyResult {
-    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider));
-    match entry.delete_password() {
-        Ok(()) => KeyResult { ok: true, error: None },
-        Err(e) => KeyResult {
+    match keyring_entry(&format!("llm_api_key:{}", provider)) {
+        Ok(entry) => match entry.delete_password() {
+            Ok(()) => KeyResult { ok: true, error: None },
+            Err(e) => KeyResult {
+                ok: false,
+                error: Some(format!("Failed to clear key: {}", e)),
+            },
+        },
+        Err(error) => KeyResult {
             ok: false,
-            error: Some(format!("Failed to clear key: {}", e)),
+            error: Some(error),
         },
     }
 }
@@ -835,7 +863,10 @@ struct ProposalError {
 #[tauri::command]
 async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResult, ProposalError> {
     // Retrieve API key from secure storage
-    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", params.provider));
+    let entry = keyring_entry(&format!("llm_api_key:{}", params.provider)).map_err(|e| ProposalError {
+        code: "KEYRING_ERROR".to_string(),
+        message: e,
+    })?;
     let api_key = entry.get_password().map_err(|e| ProposalError {
         code: "NO_API_KEY".to_string(),
         message: format!("No API key configured: {}", e),
@@ -950,8 +981,8 @@ mod base64 {
 // Iteration 31: Advanced Agent System - State and Commands
 // ============================================================================
 
-use agent::providers::{ProviderRouter, ProviderType, ProviderConfig};
-use agent::{AdvancedAgent, AgentConfig, AgentEvent, SafetyLevel};
+use agent::providers::{LlmProvider as _, ProviderRouter, ProviderType};
+use agent::{AdvancedAgent, AgentConfig, AgentEvent};
 
 /// State for the advanced agent
 pub struct AgentState {
@@ -1021,7 +1052,7 @@ async fn test_provider(provider_type: String) -> Result<bool, String> {
         }
         ProviderType::OpenAi | ProviderType::Claude => {
             // These require API keys, check if key exists
-            let key_entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider_type));
+            let key_entry = keyring_entry(&format!("llm_api_key:{}", provider_type))?;
             Ok(key_entry.get_password().is_ok())
         }
     }
@@ -1030,7 +1061,7 @@ async fn test_provider(provider_type: String) -> Result<bool, String> {
 /// Set provider API key (stored in keychain)
 #[tauri::command]
 fn set_provider_api_key(provider_type: String, api_key: String) -> Result<(), String> {
-    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider_type));
+    let entry = keyring_entry(&format!("llm_api_key:{}", provider_type))?;
     entry.set_password(&api_key)
         .map_err(|e| format!("Failed to store API key: {}", e))
 }
@@ -1038,8 +1069,9 @@ fn set_provider_api_key(provider_type: String, api_key: String) -> Result<(), St
 /// Check if provider API key exists
 #[tauri::command]
 fn has_provider_api_key(provider_type: String) -> bool {
-    let entry = keyring::Entry::new("ai-operator", &format!("llm_api_key:{}", provider_type));
-    entry.get_password().is_ok()
+    keyring_entry(&format!("llm_api_key:{}", provider_type))
+        .map(|entry| entry.get_password().is_ok())
+        .unwrap_or(false)
 }
 
 /// Start a new agent task
@@ -1166,7 +1198,7 @@ pub fn run() {
 
             TrayIconBuilder::with_id("main-tray")
                 .menu(&tray_menu)
-                .on_menu_event(|app, event| {
+                .on_menu_event(|app: &AppHandle, event: MenuEvent| {
                     match event.id().as_ref() {
                         "toggle_window" => {
                             if let Some(window) = app.get_webview_window("main") {
@@ -1212,7 +1244,11 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let runtime = window.state::<TrayRuntimeState>();
-                hide_window_to_tray(window, &runtime);
+                if let Some(main_window) = window.app_handle().get_webview_window("main") {
+                    hide_window_to_tray(&main_window, &runtime);
+                } else {
+                    let _ = window.hide();
+                }
             }
         })
         .run(tauri::generate_context!())

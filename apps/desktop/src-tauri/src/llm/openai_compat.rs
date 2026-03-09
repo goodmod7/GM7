@@ -164,21 +164,27 @@ impl LlmProvider for OpenAiCompatProvider {
             })?;
 
         // Parse the JSON response
-        let proposal: AgentProposal = serde_json::from_str(&content).map_err(|e| {
-            // Try to extract JSON from markdown code block
-            let cleaned = content
-                .trim()
-                .strip_prefix("```json")
-                .or_else(|| content.trim().strip_prefix("```"))
-                .and_then(|s| s.strip_suffix("```"))
-                .unwrap_or(&content)
-                .trim();
-            
-            serde_json::from_str(cleaned).map_err(|_| LlmError {
-                code: "INVALID_JSON".to_string(),
-                message: format!("Failed to parse proposal: {}. Content: {}", e, content.chars().take(200).collect::<String>()),
-            })
-        })?;
+        let proposal: AgentProposal = match serde_json::from_str(&content) {
+            Ok(proposal) => proposal,
+            Err(e) => {
+                let cleaned = content
+                    .trim()
+                    .strip_prefix("```json")
+                    .or_else(|| content.trim().strip_prefix("```"))
+                    .and_then(|s| s.strip_suffix("```"))
+                    .unwrap_or(&content)
+                    .trim();
+
+                serde_json::from_str(cleaned).map_err(|_| LlmError {
+                    code: "INVALID_JSON".to_string(),
+                    message: format!(
+                        "Failed to parse proposal: {}. Content: {}",
+                        e,
+                        content.chars().take(200).collect::<String>()
+                    ),
+                })?
+            }
+        };
 
         Ok(proposal)
     }

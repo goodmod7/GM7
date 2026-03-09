@@ -116,11 +116,14 @@ impl<'a> HierarchicalPlanner<'a> {
             }
         }
 
+        let estimated_duration_secs = estimate_duration(&steps);
+        let required_apps = detect_required_apps(goal, &steps);
+
         Ok(TaskPlan {
             goal: goal.to_string(),
             steps,
-            estimated_duration_secs: estimate_duration(&steps),
-            required_apps: detect_required_apps(goal, &steps),
+            estimated_duration_secs,
+            required_apps,
         })
     }
 
@@ -153,11 +156,14 @@ impl<'a> HierarchicalPlanner<'a> {
             }
         }
 
+        let estimated_duration_secs = estimate_duration(&steps);
+        let required_apps = detect_required_apps(&current_plan.goal, &steps);
+
         Ok(TaskPlan {
             goal: current_plan.goal.clone(),
             steps,
-            estimated_duration_secs: estimate_duration(&steps),
-            required_apps: detect_required_apps(&current_plan.goal, &steps),
+            estimated_duration_secs,
+            required_apps,
         })
     }
 }
@@ -176,7 +182,7 @@ fn estimate_duration(steps: &[PlanStep]) -> u64 {
 }
 
 /// Detect required applications from goal and steps
-fn detect_required_apps(goal: &str, steps: &[PlanStep]) -> Vec<String> {
+fn detect_required_apps(goal: &str, _steps: &[PlanStep]) -> Vec<String> {
     let goal_lower = goal.to_lowercase();
     let mut apps = Vec::new();
     

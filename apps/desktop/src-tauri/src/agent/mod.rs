@@ -10,7 +10,7 @@ pub mod vision;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 pub use executor::{ActionExecutor, ExecuteError};
 pub use planner::{PlanStep, StepStatus, TaskPlan};
@@ -182,4 +182,106 @@ pub enum AgentError {
     TaskNotFound(String),
     #[error("Cancelled")]
     Cancelled,
+}
+
+type AgentEventCallback = Arc<dyn Fn(AgentEvent) + Send + Sync + 'static>;
+
+/// Minimal agent runtime used by the desktop command layer.
+///
+/// The richer autonomous execution pipeline is still under development, but
+/// packaged beta builds still need a concrete runtime type for the Tauri IPC
+/// commands and UI event stream.
+pub struct AdvancedAgent {
+    config: AgentConfig,
+    _router: Arc<ProviderRouter>,
+    callback: AgentEventCallback,
+    current_task: Arc<RwLock<Option<AgentTask>>>,
+}
+
+impl AdvancedAgent {
+    pub fn new(
+        config: AgentConfig,
+        router: Arc<ProviderRouter>,
+        callback: Box<dyn Fn(AgentEvent) + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            config,
+            _router: router,
+            callback: Arc::from(callback),
+            current_task: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub async fn start_task(&self, goal: String) -> Result<String, AgentError> {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let created_at = now();
+
+        {
+            let mut guard = self.current_task.write().await;
+            *guard = Some(AgentTask {
+                task_id: task_id.clone(),
+                goal: goal.clone(),
+                status: AgentTaskStatus::Planning,
+                plan: None,
+                current_cost: 0.0,
+                provider_used: Some(self.config.primary_provider),
+                created_at,
+                updated_at: created_at,
+            });
+        }
+
+        let callback = self.callback.clone();
+        let current_task = self.current_task.clone();
+        let task_id_for_events = task_id.clone();
+        let goal_for_events = goal.clone();
+
+        tokio::spawn(async move {
+            (callback)(AgentEvent::TaskStarted {
+                task_id: task_id_for_events.clone(),
+                goal: goal_for_events.clone(),
+            });
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            let plan = planner::create_simple_plan(&goal_for_events);
+            {
+                let mut guard = current_task.write().await;
+                if let Some(task) = guard.as_mut() {
+                    task.plan = Some(plan.clone());
+                    task.status = AgentTaskStatus::Failed {
+                        reason: "Advanced Agent runtime is not yet available in packaged beta builds."
+                            .to_string(),
+                    };
+                    task.updated_at = now();
+                }
+            }
+
+            (callback)(AgentEvent::PlanCreated {
+                task_id: task_id_for_events.clone(),
+                plan,
+            });
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+            (callback)(AgentEvent::TaskFailed {
+                task_id: task_id_for_events,
+                reason: "Advanced Agent runtime is not yet available in packaged beta builds."
+                    .to_string(),
+            });
+        });
+
+        Ok(task_id)
+    }
+
+    pub async fn get_current_task(&self) -> Option<AgentTask> {
+        self.current_task.read().await.clone()
+    }
+
+    pub async fn cancel(&self) {
+        let mut guard = self.current_task.write().await;
+        if let Some(task) = guard.as_mut() {
+            task.status = AgentTaskStatus::Cancelled;
+            task.updated_at = now();
+        }
+    }
 }

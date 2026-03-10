@@ -41,6 +41,9 @@ coverage/
 # Turbo
 .turbo/
 
+# Local git worktrees
+.worktrees/
+
 # Desktop compiled JS (source only)
 apps/desktop/src/**/*.js
 apps/desktop/src/**/*.js.map

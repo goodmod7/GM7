@@ -42,6 +42,7 @@ import {
   desktopAuth,
   validateDesktopLoopbackCallbackUrl,
 } from './lib/desktop-auth.js';
+import { buildDesktopAccountSnapshot } from './lib/desktop-account.js';
 import { createRunForOwnedDevice } from './lib/run-creation.js';
 import { revokeDesktopSession } from './lib/desktop-session.js';
 import { startRetentionScheduler } from './lib/retention.js';
@@ -1205,6 +1206,30 @@ fastify.get('/desktop/me', async (request, reply) => {
   };
 });
 
+fastify.get('/desktop/account', async (request, reply) => {
+  const desktopSession = await requireDesktopDeviceSession(request, reply);
+  if (!desktopSession) {
+    return { error: 'Unauthorized' };
+  }
+
+  const user = await usersRepo.findById(desktopSession.userId);
+  if (!user) {
+    reply.status(401);
+    return { error: 'Unauthorized' };
+  }
+
+  const snapshot = await buildDesktopAccountSnapshot({
+    user,
+    currentDeviceId: desktopSession.deviceId,
+    listOwnedDevices: () => getOwnedDevices(user.id),
+  });
+
+  return {
+    ok: true,
+    ...snapshot,
+  };
+});
+
 fastify.post('/desktop/runs', async (request, reply) => {
   const desktopSession = await requireDesktopDeviceSession(request, reply);
   if (!desktopSession) {
@@ -1281,6 +1306,50 @@ fastify.post('/desktop/runs', async (request, reply) => {
   return {
     ok: true,
     run: created.run,
+  };
+});
+
+fastify.post('/desktop/devices/:deviceId/revoke', async (request, reply) => {
+  const desktopSession = await requireDesktopDeviceSession(request, reply);
+  if (!desktopSession) {
+    return { error: 'Unauthorized' };
+  }
+
+  if (!(await enforceHttpRateLimit(reply, `user:${desktopSession.userId}:desktop-devices:revoke`, config.AUTH_LOGIN_PER_MIN, 60_000))) {
+    return;
+  }
+
+  const { deviceId } = request.params as { deviceId: string };
+
+  if (deviceId === desktopSession.deviceId) {
+    reply.status(400);
+    return { error: 'Use desktop sign out to revoke the current desktop session' };
+  }
+
+  const targetDevice = await devicesRepo.findByDeviceId(deviceId);
+  if (!targetDevice || targetDevice.ownerUserId !== desktopSession.userId) {
+    reply.status(404);
+    return { error: 'Device not found' };
+  }
+
+  if (targetDevice.deviceToken) {
+    await devicesRepo.revokeOwnedDeviceSession(deviceId, desktopSession.userId);
+    deviceStore.revokeSession(deviceId);
+    ownership.setDeviceOwner(deviceId, desktopSession.userId);
+    await createAuditEvent(request, {
+      userId: desktopSession.userId,
+      deviceId,
+      eventType: 'device.token_revoked',
+      meta: {
+        initiatedBy: 'desktop',
+        initiatedFromDeviceId: desktopSession.deviceId,
+      },
+    });
+  }
+
+  return {
+    ok: true,
+    device: await getOwnedDevice(desktopSession.userId, deviceId),
   };
 });
 

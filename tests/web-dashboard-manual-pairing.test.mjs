@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const dashboardPath = 'apps/web/app/dashboard/page.tsx';
+const dashboardPath = 'apps/web/app/dashboard/legacy/page.tsx';
 
-test('dashboard includes a manual device pairing form for newly connected desktops', () => {
+test('legacy dashboard includes a manual device pairing form for newly connected desktops', () => {
   const source = readFileSync(dashboardPath, 'utf8');
 
   assert.match(
     source,
     /Pair a desktop device/i,
-    'Dashboard should expose a manual pairing section for newly connected devices'
+    'Legacy dashboard should expose a manual pairing section for newly connected devices'
   );
 
   assert.match(

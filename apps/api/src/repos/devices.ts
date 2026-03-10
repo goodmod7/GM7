@@ -158,6 +158,41 @@ export const devicesRepo = {
     };
   },
 
+  async revokeOwnedDeviceSession(deviceId: string, ownerUserId: string) {
+    const now = new Date();
+    const result = await prisma.device.updateMany({
+      where: {
+        id: deviceId,
+        ownerUserId,
+      },
+      data: {
+        deviceToken: null,
+        updatedAt: now,
+      },
+    });
+
+    if (result.count === 0) {
+      return null;
+    }
+
+    const row = await prisma.device.findFirst({
+      where: {
+        id: deviceId,
+        ownerUserId,
+      },
+    });
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      device: rowToDevice(row as DeviceRow),
+      ownerUserId: row.ownerUserId,
+      deviceToken: row.deviceToken,
+    };
+  },
+
   async updateLastSeen(deviceId: string) {
     await prisma.device.update({
       where: { id: deviceId },

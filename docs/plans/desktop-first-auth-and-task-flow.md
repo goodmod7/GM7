@@ -15,6 +15,15 @@ Adopt a desktop-first sign-in flow built on the existing `deviceId + deviceToken
 - Pairing endpoints remain temporarily for migration, but pairing disappears from the primary desktop UX.
 - The web dashboard remains available for auth, billing, downloads, account/device management, and admin/debug fallback.
 
+**Implemented State As Of 2026-03-10**
+
+- Phase 1 is implemented: desktop browser sign-in, one-time handoff, durable device token storage, sign-out, and revoke.
+- Phase 2 is implemented: desktop starts tasks directly through the existing run model and remains the primary task surface.
+- Phase 3 and Phase 4 posture are implemented in the current product shell:
+  - desktop exposes account/device session management
+  - web dashboard is desktop-first
+  - legacy pairing and web run creation remain available only behind `Admin / Legacy Tools`
+
 ## 1. Auth And Connection Model
 
 Desktop sign-in becomes the ownership flow for a device.

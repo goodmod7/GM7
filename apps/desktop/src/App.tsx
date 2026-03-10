@@ -17,6 +17,7 @@ import {
 import { AiAssistController, hasLlMProviderConfigured, type LlmSettings, type LocalToolEvent } from './lib/aiAssist.js';
 import { desktopRuntimeConfig } from './lib/desktopRuntimeConfig.js';
 import { logoutDesktopSession, startDesktopSignIn } from './lib/desktopAuth.js';
+import { getDesktopAccount, revokeDesktopDevice, type DesktopAccountSnapshot } from './lib/desktopAccount.js';
 import { createDesktopRun, getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
 import {
   getPermissionStatus,
@@ -177,6 +178,10 @@ function App() {
   const [desktopBootstrap, setDesktopBootstrap] = useState<DesktopTaskBootstrap | null>(null);
   const [desktopBootstrapBusy, setDesktopBootstrapBusy] = useState(false);
   const [desktopBootstrapError, setDesktopBootstrapError] = useState<string | null>(null);
+  const [desktopAccount, setDesktopAccount] = useState<DesktopAccountSnapshot | null>(null);
+  const [desktopAccountBusy, setDesktopAccountBusy] = useState(false);
+  const [desktopAccountError, setDesktopAccountError] = useState<string | null>(null);
+  const [deviceRevokeBusyId, setDeviceRevokeBusyId] = useState<string | null>(null);
   const [taskGoal, setTaskGoal] = useState('');
   const [taskMode, setTaskMode] = useState<RunMode>('ai_assist');
   const [taskCreateBusy, setTaskCreateBusy] = useState(false);
@@ -768,6 +773,41 @@ function App() {
   }, [authState, runtimeConfig, sessionDeviceToken]);
 
   useEffect(() => {
+    if (!runtimeConfig || !sessionDeviceToken || authState !== 'signed_in') {
+      setDesktopAccount(null);
+      setDesktopAccountBusy(false);
+      setDesktopAccountError(null);
+      setDeviceRevokeBusyId(null);
+      return;
+    }
+
+    let cancelled = false;
+    setDesktopAccountBusy(true);
+    setDesktopAccountError(null);
+
+    void getDesktopAccount(runtimeConfig, sessionDeviceToken)
+      .then((account) => {
+        if (!cancelled) {
+          setDesktopAccount(account);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setDesktopAccountError(err instanceof Error ? err.message : 'Failed to load desktop account');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setDesktopAccountBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authState, runtimeConfig, sessionDeviceToken]);
+
+  useEffect(() => {
     if (!activeRun) {
       return;
     }
@@ -1041,6 +1081,9 @@ function App() {
     setAuthState('signed_out');
     setDesktopBootstrap(null);
     setDesktopBootstrapError(null);
+    setDesktopAccount(null);
+    setDesktopAccountError(null);
+    setDeviceRevokeBusyId(null);
     setTaskCreateError(null);
     setTaskGoal('');
     setRecentRuns([]);
@@ -1137,6 +1180,26 @@ function App() {
       setActiveRun(selected);
     }
   }, [recentRuns]);
+
+  const handleRevokeDesktopDevice = useCallback(async (targetDeviceId: string) => {
+    if (!runtimeConfig || !sessionDeviceToken) {
+      setDesktopAccountError('Desktop sign-in is required before managing device sessions.');
+      return;
+    }
+
+    setDeviceRevokeBusyId(targetDeviceId);
+    setDesktopAccountError(null);
+
+    try {
+      await revokeDesktopDevice(runtimeConfig, sessionDeviceToken, targetDeviceId);
+      const refreshed = await getDesktopAccount(runtimeConfig, sessionDeviceToken);
+      setDesktopAccount(refreshed);
+    } catch (err) {
+      setDesktopAccountError(err instanceof Error ? err.message : 'Failed to revoke desktop session');
+    } finally {
+      setDeviceRevokeBusyId(null);
+    }
+  }, [runtimeConfig, sessionDeviceToken]);
 
   // Handle approval decision
   const handleApprovalDecision = useCallback((decision: 'approved' | 'denied', comment?: string) => {
@@ -1352,6 +1415,7 @@ function App() {
     .filter((item) => item.state === 'pending')
     .sort((left, right) => left.createdAt - right.createdAt);
   const subscriptionStatus = desktopBootstrap?.billing.subscriptionStatus ?? 'inactive';
+  const siblingDevices = desktopAccount?.devices.filter((device) => device.deviceId !== desktopAccount.currentDevice?.deviceId) ?? [];
   const taskReadiness = evaluateDesktopTaskReadiness({
     mode: taskMode,
     subscriptionStatus,
@@ -1866,6 +1930,130 @@ function App() {
                 )}
               </section>
             </div>
+
+            <section
+              style={{
+                marginTop: '1rem',
+                padding: '1rem',
+                background: 'white',
+                borderRadius: '8px',
+                border: '1px solid #e5e7eb',
+              }}
+            >
+              <h2 style={{ margin: 0, fontSize: '1rem' }}>Account & Devices</h2>
+              <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+                Manage the signed-in desktop session and any other desktops on this account.
+              </p>
+
+              {desktopAccountBusy && (
+                <p style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#6b7280' }}>
+                  Loading device sessions...
+                </p>
+              )}
+
+              {desktopAccountError && (
+                <div
+                  style={{
+                    marginTop: '0.75rem',
+                    padding: '0.75rem',
+                    background: '#fef2f2',
+                    border: '1px solid #fecaca',
+                    borderRadius: '6px',
+                    fontSize: '0.875rem',
+                    color: '#991b1b',
+                  }}
+                >
+                  {desktopAccountError}
+                </div>
+              )}
+
+              {desktopAccount && (
+                <div
+                  style={{
+                    marginTop: '1rem',
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                    gap: '1rem',
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: '0.75rem',
+                      background: '#f9fafb',
+                      borderRadius: '6px',
+                      border: '1px solid #e5e7eb',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>Current desktop</div>
+                    <div style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
+                      {desktopAccount.currentDevice?.deviceName || `Desktop-${deviceId.slice(0, 8)}`}
+                    </div>
+                    <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                      {desktopAccount.user.email} • {desktopAccount.billing.subscriptionStatus === 'active' ? 'Subscription active' : 'Subscription inactive'}
+                    </div>
+                    {desktopAccount.currentDevice && (
+                      <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                        {desktopAccount.currentDevice.platform} • {desktopAccount.currentDevice.connected ? 'Connected' : 'Offline'}
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      padding: '0.75rem',
+                      background: '#f9fafb',
+                      borderRadius: '6px',
+                      border: '1px solid #e5e7eb',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>Device Sessions</div>
+                    {siblingDevices.length === 0 ? (
+                      <p style={{ margin: '0.5rem 0 0', fontSize: '0.875rem', color: '#6b7280' }}>
+                        No other signed-in desktops on this account.
+                      </p>
+                    ) : (
+                      <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.5rem' }}>
+                        {siblingDevices.map((device) => (
+                          <div
+                            key={device.deviceId}
+                            style={{
+                              padding: '0.75rem',
+                              background: 'white',
+                              borderRadius: '6px',
+                              border: '1px solid #e5e7eb',
+                            }}
+                          >
+                            <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>
+                              {device.deviceName || `Desktop-${device.deviceId.slice(0, 8)}`}
+                            </div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                              {device.platform} • {device.connected ? 'Connected' : 'Offline'} • Last seen {new Date(device.lastSeenAt).toLocaleString()}
+                            </div>
+                            <button
+                              onClick={() => {
+                                void handleRevokeDesktopDevice(device.deviceId);
+                              }}
+                              disabled={deviceRevokeBusyId === device.deviceId}
+                              style={{
+                                marginTop: '0.5rem',
+                                padding: '0.45rem 0.65rem',
+                                borderRadius: '6px',
+                                border: '1px solid #fdba74',
+                                background: deviceRevokeBusyId === device.deviceId ? '#e5e7eb' : '#fff7ed',
+                                color: deviceRevokeBusyId === device.deviceId ? '#6b7280' : '#9a3412',
+                                cursor: deviceRevokeBusyId === device.deviceId ? 'not-allowed' : 'pointer',
+                              }}
+                            >
+                              {deviceRevokeBusyId === device.deviceId ? 'Revoking...' : 'Revoke session'}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
 
             <div
               style={{

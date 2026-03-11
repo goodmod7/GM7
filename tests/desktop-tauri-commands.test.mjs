@@ -103,3 +103,19 @@ test('desktop IPC permission allowlist matches exported Rust commands exactly', 
     'every exported tauri command must be explicitly allowlisted and no extra commands may be exposed'
   );
 });
+
+test('desktop screen-preview payload structs serialize in camelCase for the webview', () => {
+  const source = readFileSync(path.join(rustSrcRoot, 'lib.rs'), 'utf8');
+
+  for (const structName of ['DisplayInfo', 'CaptureResult', 'CaptureError', 'InputError']) {
+    const pattern = new RegExp(
+      `#\\s*\\[derive\\(Serialize\\)\\]\\s*#\\s*\\[serde\\(rename_all\\s*=\\s*"camelCase"\\)\\]\\s*struct\\s+${structName}\\b`,
+      'm'
+    );
+    assert.match(
+      source,
+      pattern,
+      `${structName} must serialize in camelCase to match the TypeScript desktop client contracts`
+    );
+  }
+});

@@ -26,18 +26,13 @@ interface FreeAiSetupCardProps {
 }
 
 const STAGE_ORDER: Array<{ key: LocalAiInstallStage; label: string }> = [
-  { key: 'not_started', label: 'Not installed' },
-  { key: 'installing', label: 'Downloading' },
-  { key: 'installed', label: 'Installed' },
-  { key: 'starting', label: 'Starting' },
-  { key: 'ready', label: 'Ready' },
-  { key: 'error', label: 'Error' },
+  { key: 'not_started', label: 'Check this device' },
+  { key: 'installing', label: 'Install local engine' },
+  { key: 'installed', label: 'Download AI model' },
+  { key: 'starting', label: 'Start local engine' },
+  { key: 'ready', label: 'Ready to use' },
+  { key: 'error', label: 'Repair available' },
 ];
-const TIER_RECOMMENDATION_LABELS: Record<LocalAiTier, string> = {
-  light: 'Light recommended',
-  standard: 'Standard recommended',
-  vision: 'Vision Boost optional',
-};
 
 function summarizeHardware(profile: LocalAiHardwareProfile | null): string | null {
   if (!profile) {
@@ -100,9 +95,9 @@ export function FreeAiSetupCard({
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div>
-          <h3 style={{ margin: 0, fontSize: '1rem', color: '#0f172a' }}>Start Free AI</h3>
+          <h3 style={{ margin: 0, fontSize: '1rem', color: '#0f172a' }}>Set Up Free AI</h3>
           <p style={{ margin: '0.35rem 0 0', color: '#475569', fontSize: '0.875rem', maxWidth: '64ch', lineHeight: 1.5 }}>
-            The desktop can prepare a free local assistant for this machine. It starts with a lighter local mode by default and keeps Vision Boost optional.
+            GORKH can install the local engine, download the default AI model, and verify that everything is ready on this desktop without using the terminal.
           </p>
         </div>
         <div
@@ -118,7 +113,7 @@ export function FreeAiSetupCard({
             fontSize: '0.75rem',
           }}
         >
-          {stageLabel}
+          {activeStage === 'ready' ? 'Ready to use' : activeStage === 'error' ? 'Repair available' : stageLabel}
         </div>
       </div>
 
@@ -176,6 +171,21 @@ export function FreeAiSetupCard({
         </div>
       )}
 
+      <div
+        style={{
+          marginTop: '1rem',
+          padding: '0.85rem',
+          background: 'white',
+          border: '1px solid #e5e7eb',
+          borderRadius: '8px',
+          fontSize: '0.875rem',
+          color: '#334155',
+        }}
+      >
+        <strong>Recommended for this device:</strong> {selectedDetails.title}. {selectedDetails.bestFor}
+        {' '}Estimated download {selectedDetails.downloadSizeLabel}. Keep roughly {selectedDetails.diskRequirementLabel} free.
+      </div>
+
       {status?.externalServiceDetected && activeStage !== 'ready' && (
         <div
           style={{
@@ -188,7 +198,7 @@ export function FreeAiSetupCard({
             fontSize: '0.875rem',
           }}
         >
-          A local AI service is already running on this machine. You can refresh status or keep using the assistant while the managed setup path is added.
+          GORKH found an existing local AI service on this machine. You can keep using it, or let GORKH manage the local engine instead.
         </div>
       )}
 
@@ -208,69 +218,6 @@ export function FreeAiSetupCard({
         </div>
       )}
 
-      <div
-        style={{
-          marginTop: '1rem',
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-          gap: '0.75rem',
-        }}
-      >
-        {(['light', 'standard', 'vision'] as LocalAiTier[]).map((tier) => {
-          const details = getLocalAiTierDetails(tier);
-          const isSelected = selectedTier === tier;
-          const isRecommended = recommendation?.tier === tier;
-          const label =
-            tier === 'vision'
-              ? TIER_RECOMMENDATION_LABELS.vision
-              : isRecommended
-                ? TIER_RECOMMENDATION_LABELS[tier]
-                : details.title;
-
-          return (
-            <button
-              key={tier}
-              type="button"
-              onClick={() => setSelectedTier(tier)}
-              style={{
-                textAlign: 'left',
-                padding: '0.9rem',
-                borderRadius: '10px',
-                border: `1px solid ${isSelected ? '#0f172a' : '#dbe4f0'}`,
-                background: isSelected ? '#f8fafc' : 'white',
-                cursor: 'pointer',
-              }}
-            >
-              <div style={{ fontSize: '0.875rem', fontWeight: 700, color: '#0f172a' }}>{label}</div>
-              <div style={{ marginTop: '0.35rem', fontSize: '0.8125rem', color: '#475569' }}>{details.bestFor}</div>
-              <div style={{ marginTop: '0.55rem', fontSize: '0.75rem', color: '#64748b' }}>
-                Download: {details.downloadSizeLabel}
-              </div>
-              <div style={{ marginTop: '0.2rem', fontSize: '0.75rem', color: '#64748b' }}>
-                Disk: {details.diskRequirementLabel}
-              </div>
-              <div style={{ marginTop: '0.2rem', fontSize: '0.75rem', color: '#64748b' }}>
-                {details.performanceExpectation}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-
-      <div
-        style={{
-          marginTop: '1rem',
-          padding: '0.85rem',
-          background: 'white',
-          border: '1px solid #e5e7eb',
-          borderRadius: '8px',
-          fontSize: '0.875rem',
-          color: '#334155',
-        }}
-      >
-        <strong>{selectedDetails.title}:</strong> {selectedDetails.bestFor} Estimated download {selectedDetails.downloadSizeLabel}. Keep roughly {selectedDetails.diskRequirementLabel} free.
-      </div>
-
       {visionBoostAvailable && (
         <div
           style={{
@@ -287,7 +234,7 @@ export function FreeAiSetupCard({
           <p style={{ margin: '0.45rem 0 0', lineHeight: 1.5 }}>
             {visionBoostInstalled
               ? `Ready with ${visionModel}. The assistant can stay lightweight for normal work and only use the heavier screenshot model when a task truly needs it.`
-              : `Optional for screenshot-heavy work such as Photoshop, Blender, or UI automation. The default free model stays lighter until you enable ${visionModel}.`}
+              : `Add screenshot understanding later for tasks like Photoshop, Blender, and UI automation. The default Free AI setup stays lighter until you enable ${visionModel}.`}
           </p>
           {!visionBoostInstalled && (
             <button
@@ -324,7 +271,7 @@ export function FreeAiSetupCard({
             fontWeight: 600,
           }}
         >
-          {actionBusy ? 'Preparing Free AI...' : 'Start Free AI'}
+          {actionBusy ? 'Installing Free AI...' : activeStage === 'error' ? 'Repair Free AI' : 'Set Up Free AI'}
         </button>
         <button
           onClick={onRefresh}

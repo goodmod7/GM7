@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env, fs, io,
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -11,8 +11,15 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use reqwest::Client;
+use flate2::read::GzDecoder;
+use reqwest::{blocking::Client as BlockingClient, Client};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tar::Archive;
+use zip::ZipArchive;
+
+#[path = "local_ai_manifest.rs"]
+mod local_ai_manifest;
 
 const LOCAL_AI_SERVICE_URL: &str = "http://127.0.0.1:11434";
 const LOCAL_AI_HOST: &str = "127.0.0.1:11434";
@@ -47,6 +54,16 @@ pub enum LocalAiGpuClass {
     Discrete,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalAiRuntimeSource {
+    #[serde(alias = "managed_or_adopted_ollama")]
+    Managed,
+    ExistingInstall,
+    #[serde(alias = "existing_local_service")]
+    ExistingService,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalAiRuntimeStatus {
@@ -61,7 +78,7 @@ pub struct LocalAiRuntimeStatus {
     pub selected_tier: Option<LocalAiTier>,
     pub selected_model: Option<String>,
     pub installed_models: Vec<String>,
-    pub runtime_source: Option<String>,
+    pub runtime_source: Option<LocalAiRuntimeSource>,
     pub runtime_version: Option<String>,
     pub last_error: Option<String>,
 }
@@ -112,12 +129,18 @@ pub struct LocalAiInstallRequest {
 #[serde(rename_all = "camelCase")]
 struct LocalAiInstallMetadata {
     runtime_version: String,
-    runtime_source: String,
+    runtime_source: LocalAiRuntimeSource,
     selected_tier: LocalAiTier,
     selected_model: String,
     installed_models: Vec<String>,
     optional_vision_model: Option<String>,
     updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRuntimeBinary {
+    path: PathBuf,
+    source: LocalAiRuntimeSource,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,7 +207,7 @@ pub async fn runtime_status(state: &LocalAiRuntimeState) -> Result<LocalAiRuntim
             .as_ref()
             .map(|value| value.installed_models.clone())
             .unwrap_or_default(),
-        runtime_source: metadata.as_ref().map(|value| value.runtime_source.clone()),
+        runtime_source: metadata.as_ref().map(|value| value.runtime_source),
         runtime_version: metadata.as_ref().map(|value| value.runtime_version.clone()),
         last_error,
     })
@@ -412,7 +435,7 @@ pub async fn start_runtime(state: &LocalAiRuntimeState) -> Result<LocalAiRuntime
     );
     clear_last_error(state);
 
-    let _ = ensure_service_running(state, &managed_dir, &runtime_binary)?;
+    let _ = ensure_service_running(state, &managed_dir, &runtime_binary.path)?;
 
     set_install_progress(
         state,
@@ -558,13 +581,24 @@ fn run_install_worker(
     );
 
     let runtime_binary = ensure_runtime_binary(&managed_dir)?;
-    let runtime_version =
-        detect_runtime_version(&runtime_binary).unwrap_or_else(|| "ollama-unknown".to_string());
-    let runtime_source = if read_metadata(&managed_dir).is_some() || runtime_binary.exists() {
-        "managed_or_adopted_ollama".to_string()
-    } else {
-        "unknown".to_string()
-    };
+    let runtime_version = detect_runtime_version(&runtime_binary.path)
+        .unwrap_or_else(|| "ollama-unknown".to_string());
+
+    set_install_progress(
+        &state,
+        LocalAiInstallProgress {
+            stage: LocalAiInstallStage::Installed,
+            selected_tier: Some(selected_tier),
+            selected_model: Some(plan.default_model.to_string()),
+            progress_percent: Some(35),
+            downloaded_bytes: None,
+            total_bytes: None,
+            message: Some(
+                "Managed local runtime installed. Starting the local AI service...".to_string(),
+            ),
+            updated_at_ms: unix_time_ms(),
+        },
+    );
 
     set_install_progress(
         &state,
@@ -572,7 +606,7 @@ fn run_install_worker(
             stage: LocalAiInstallStage::Starting,
             selected_tier: Some(selected_tier),
             selected_model: Some(plan.default_model.to_string()),
-            progress_percent: Some(35),
+            progress_percent: Some(45),
             downloaded_bytes: None,
             total_bytes: None,
             message: Some("Starting the local AI service...".to_string()),
@@ -580,7 +614,8 @@ fn run_install_worker(
         },
     );
 
-    let started_managed_service = ensure_service_running(&state, &managed_dir, &runtime_binary)?;
+    let started_managed_service =
+        ensure_service_running(&state, &managed_dir, &runtime_binary.path)?;
 
     let metadata_before = read_metadata(&managed_dir);
     let already_installed = metadata_before
@@ -610,15 +645,15 @@ fn run_install_worker(
                 updated_at_ms: unix_time_ms(),
             },
         );
-        pull_model(&runtime_binary, &managed_dir, plan.default_model)?;
+        pull_model(&runtime_binary.path, &managed_dir, plan.default_model)?;
     }
 
     let metadata = LocalAiInstallMetadata {
         runtime_version,
         runtime_source: if started_managed_service {
-            runtime_source
+            runtime_binary.source
         } else {
-            "existing_local_service".to_string()
+            LocalAiRuntimeSource::ExistingService
         },
         selected_tier,
         selected_model: plan.default_model.to_string(),
@@ -670,7 +705,7 @@ fn run_enable_vision_boost_worker(
     );
 
     let runtime_binary = ensure_runtime_binary(&managed_dir)?;
-    let _ = ensure_service_running(&state, &managed_dir, &runtime_binary)?;
+    let _ = ensure_service_running(&state, &managed_dir, &runtime_binary.path)?;
 
     set_install_progress(
         &state,
@@ -694,7 +729,7 @@ fn run_enable_vision_boost_worker(
         .iter()
         .any(|model| model == vision_model)
     {
-        pull_model(&runtime_binary, &managed_dir, vision_model)?;
+        pull_model(&runtime_binary.path, &managed_dir, vision_model)?;
     }
 
     let mut installed_models = existing_metadata.installed_models.clone();
@@ -796,39 +831,369 @@ fn write_metadata(managed_dir: &Path, metadata: &LocalAiInstallMetadata) -> Resu
     })
 }
 
-fn ensure_runtime_binary(managed_dir: &Path) -> Result<PathBuf, String> {
+fn ensure_runtime_binary(managed_dir: &Path) -> Result<ResolvedRuntimeBinary, String> {
     let path = expected_runtime_binary_path(managed_dir)
         .ok_or_else(|| "Managed local AI runtime path is unavailable.".to_string())?;
     if path.exists() {
-        return Ok(path);
+        let source = read_metadata(managed_dir)
+            .map(|metadata| metadata.runtime_source)
+            .unwrap_or(LocalAiRuntimeSource::Managed);
+        return Ok(ResolvedRuntimeBinary { path, source });
     }
 
-    let source = find_system_ollama_binary().ok_or_else(|| {
-        "Managed local runtime downloads are not configured in this build, and an existing Ollama binary was not found locally. Free AI cannot finish setup yet.".to_string()
+    match provision_managed_runtime(managed_dir) {
+        Ok(resolved) => Ok(resolved),
+        Err(download_error) => {
+            let source = find_system_ollama_binary().ok_or_else(|| {
+                format!(
+                    "Managed local runtime download failed: {} Existing Ollama binary was also not found locally, so Free AI cannot finish setup yet.",
+                    download_error
+                )
+            })?;
+
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    format!(
+                        "Failed to prepare managed runtime directory {}: {}",
+                        parent.display(),
+                        error
+                    )
+                })?;
+            }
+
+            fs::copy(&source, &path).map_err(|error| {
+                format!(
+                    "Failed to adopt local AI runtime from {} into {}: {}",
+                    source.display(),
+                    path.display(),
+                    error
+                )
+            })?;
+
+            set_runtime_executable(&path)?;
+
+            Ok(ResolvedRuntimeBinary {
+                path,
+                source: LocalAiRuntimeSource::ExistingInstall,
+            })
+        }
+    }
+}
+
+fn provision_managed_runtime(managed_dir: &Path) -> Result<ResolvedRuntimeBinary, String> {
+    let asset = local_ai_manifest::resolve_current_runtime_asset().ok_or_else(|| {
+        format!(
+            "Managed local runtime download is not supported on {}-{} yet.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
     })?;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to prepare managed runtime directory {}: {}",
-                parent.display(),
-                error
-            )
-        })?;
-    }
+    let archive_path = download_runtime_archive(&asset, managed_dir)?;
+    verify_runtime_archive_checksum(&archive_path, &asset.checksum_sha256)?;
+    let binary_path = extract_runtime_archive(&asset, &archive_path, managed_dir)?;
+    set_runtime_executable(&binary_path)?;
+    let _ = fs::remove_file(&archive_path);
 
-    fs::copy(&source, &path).map_err(|error| {
+    Ok(ResolvedRuntimeBinary {
+        path: binary_path,
+        source: LocalAiRuntimeSource::Managed,
+    })
+}
+
+fn download_runtime_archive(
+    asset: &local_ai_manifest::LocalAiRuntimeAssetManifest,
+    managed_dir: &Path,
+) -> Result<PathBuf, String> {
+    let runtime_root = runtime_dir(managed_dir);
+    fs::create_dir_all(&runtime_root).map_err(|error| {
         format!(
-            "Failed to adopt local AI runtime from {} into {}: {}",
-            source.display(),
-            path.display(),
+            "Failed to prepare managed runtime directory {}: {}",
+            runtime_root.display(),
             error
         )
     })?;
 
+    let archive_name = archive_file_name(asset);
+    let archive_path = runtime_root.join(archive_name);
+    let mut response = BlockingClient::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|error| format!("Failed to prepare managed runtime downloader: {}", error))?
+        .get(&asset.download_url)
+        .send()
+        .map_err(|error| {
+            format!(
+                "Failed to download managed runtime asset {}: {}",
+                asset.download_url, error
+            )
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            format!(
+                "Managed runtime download request failed for {}: {}",
+                asset.download_url, error
+            )
+        })?;
+
+    let mut file = fs::File::create(&archive_path).map_err(|error| {
+        format!(
+            "Failed to create runtime archive {}: {}",
+            archive_path.display(),
+            error
+        )
+    })?;
+    io::copy(&mut response, &mut file).map_err(|error| {
+        format!(
+            "Failed to write managed runtime archive {}: {}",
+            archive_path.display(),
+            error
+        )
+    })?;
+
+    Ok(archive_path)
+}
+
+fn verify_runtime_archive_checksum(path: &Path, expected_checksum: &str) -> Result<(), String> {
+    if expected_checksum.starts_with("dev-") {
+        return Ok(());
+    }
+
+    let mut file = fs::File::open(path).map_err(|error| {
+        format!(
+            "Failed to open managed runtime archive {} for checksum verification: {}",
+            path.display(),
+            error
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes_read = io::Read::read(&mut file, &mut buffer).map_err(|error| {
+            format!(
+                "Failed to hash managed runtime archive {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    let actual_checksum = format!("{:x}", hasher.finalize());
+    if actual_checksum != expected_checksum.to_ascii_lowercase() {
+        return Err(format!(
+            "Managed runtime checksum mismatch for {}.",
+            path.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn extract_runtime_archive(
+    asset: &local_ai_manifest::LocalAiRuntimeAssetManifest,
+    archive_path: &Path,
+    managed_dir: &Path,
+) -> Result<PathBuf, String> {
+    let runtime_root = runtime_dir(managed_dir);
+    let destination_path = runtime_root.join(&asset.binary_relative_path);
+
+    if archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.ends_with(".zip"))
+    {
+        extract_runtime_zip(archive_path, &asset.binary_relative_path, &destination_path)?;
+    } else if archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.ends_with(".tar.gz") || value.ends_with(".tgz"))
+    {
+        extract_runtime_tar_gz(archive_path, &asset.binary_relative_path, &destination_path)?;
+    } else {
+        return Err(format!(
+            "Managed runtime archive format is unsupported for {}.",
+            archive_path.display()
+        ));
+    }
+
+    Ok(destination_path)
+}
+
+fn extract_runtime_zip(
+    archive_path: &Path,
+    binary_relative_path: &str,
+    destination_path: &Path,
+) -> Result<(), String> {
+    let archive_file = fs::File::open(archive_path).map_err(|error| {
+        format!(
+            "Failed to open managed runtime zip {}: {}",
+            archive_path.display(),
+            error
+        )
+    })?;
+    let mut archive = ZipArchive::new(archive_file).map_err(|error| {
+        format!(
+            "Failed to read managed runtime zip {}: {}",
+            archive_path.display(),
+            error
+        )
+    })?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| {
+            format!(
+                "Failed to read managed runtime zip entry {}: {}",
+                archive_path.display(),
+                error
+            )
+        })?;
+        if !entry.is_file() {
+            continue;
+        }
+        let Some(entry_path) = entry.enclosed_name().map(|value| value.to_path_buf()) else {
+            continue;
+        };
+        if !archive_entry_matches_binary(&entry_path, binary_relative_path) {
+            continue;
+        }
+
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Failed to prepare runtime destination {}: {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        let mut output = fs::File::create(destination_path).map_err(|error| {
+            format!(
+                "Failed to create runtime binary {}: {}",
+                destination_path.display(),
+                error
+            )
+        })?;
+        io::copy(&mut entry, &mut output).map_err(|error| {
+            format!(
+                "Failed to extract runtime binary {}: {}",
+                destination_path.display(),
+                error
+            )
+        })?;
+        return Ok(());
+    }
+
+    Err(format!(
+        "Managed runtime archive {} did not contain {}.",
+        archive_path.display(),
+        binary_relative_path
+    ))
+}
+
+fn extract_runtime_tar_gz(
+    archive_path: &Path,
+    binary_relative_path: &str,
+    destination_path: &Path,
+) -> Result<(), String> {
+    let archive_file = fs::File::open(archive_path).map_err(|error| {
+        format!(
+            "Failed to open managed runtime archive {}: {}",
+            archive_path.display(),
+            error
+        )
+    })?;
+    let decoder = GzDecoder::new(archive_file);
+    let mut archive = Archive::new(decoder);
+    let entries = archive.entries().map_err(|error| {
+        format!(
+            "Failed to read managed runtime archive {}: {}",
+            archive_path.display(),
+            error
+        )
+    })?;
+
+    for entry_result in entries {
+        let mut entry = entry_result.map_err(|error| {
+            format!(
+                "Failed to read managed runtime tar entry {}: {}",
+                archive_path.display(),
+                error
+            )
+        })?;
+        let entry_path = entry.path().map_err(|error| {
+            format!(
+                "Failed to inspect managed runtime tar entry {}: {}",
+                archive_path.display(),
+                error
+            )
+        })?;
+        if !archive_entry_matches_binary(entry_path.as_ref(), binary_relative_path) {
+            continue;
+        }
+
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Failed to prepare runtime destination {}: {}",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        entry.unpack(destination_path).map_err(|error| {
+            format!(
+                "Failed to extract runtime binary {}: {}",
+                destination_path.display(),
+                error
+            )
+        })?;
+        return Ok(());
+    }
+
+    Err(format!(
+        "Managed runtime archive {} did not contain {}.",
+        archive_path.display(),
+        binary_relative_path
+    ))
+}
+
+fn archive_entry_matches_binary(entry_path: &Path, binary_relative_path: &str) -> bool {
+    if entry_path == Path::new(binary_relative_path) {
+        return true;
+    }
+    if entry_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .ends_with(binary_relative_path)
+    {
+        return true;
+    }
+    entry_path.file_name().is_some_and(|file_name| {
+        Path::new(binary_relative_path)
+            .file_name()
+            .is_some_and(|binary_name| file_name == binary_name)
+    })
+}
+
+fn archive_file_name(asset: &local_ai_manifest::LocalAiRuntimeAssetManifest) -> String {
+    if asset.download_url.ends_with(".tar.gz") {
+        "managed-runtime.tar.gz".to_string()
+    } else if asset.download_url.ends_with(".tgz") {
+        "managed-runtime.tgz".to_string()
+    } else if asset.download_url.ends_with(".zip") {
+        "managed-runtime.zip".to_string()
+    } else {
+        "managed-runtime.bin".to_string()
+    }
+}
+
+fn set_runtime_executable(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        let mut permissions = fs::metadata(&path)
+        let mut permissions = fs::metadata(path)
             .map_err(|error| {
                 format!(
                     "Failed to read runtime metadata {}: {}",
@@ -838,7 +1203,7 @@ fn ensure_runtime_binary(managed_dir: &Path) -> Result<PathBuf, String> {
             })?
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).map_err(|error| {
+        fs::set_permissions(path, permissions).map_err(|error| {
             format!(
                 "Failed to make managed runtime executable {}: {}",
                 path.display(),
@@ -847,7 +1212,12 @@ fn ensure_runtime_binary(managed_dir: &Path) -> Result<PathBuf, String> {
         })?;
     }
 
-    Ok(path)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+
+    Ok(())
 }
 
 fn find_system_ollama_binary() -> Option<PathBuf> {
@@ -1067,6 +1437,10 @@ fn managed_runtime_dir() -> PathBuf {
 }
 
 fn expected_runtime_binary_path(managed_dir: &Path) -> Option<PathBuf> {
+    if let Some(asset) = local_ai_manifest::resolve_current_runtime_asset() {
+        return Some(runtime_dir(managed_dir).join(asset.binary_relative_path));
+    }
+
     let binary_name = if cfg!(target_os = "windows") {
         "ollama.exe"
     } else {

@@ -1230,6 +1230,7 @@ function App() {
         localSettings,
         workspaceConfigured: workspaceState.configured,
         providerConfigured,
+        isManagedLocalProvider: llmSettings.provider === DEFAULT_LLM_PROVIDER,
       });
 
       if (!assistantReadiness.ready) {
@@ -1237,7 +1238,7 @@ function App() {
           ? localAiInstallProgress?.message
               || localAiRecommendation?.reason
               || 'Set up Free AI first so the local assistant can prepare this desktop.'
-          : assistantReadiness.blockers[0]?.detail || 'This desktop is not ready to start assistant work yet.';
+          : assistantReadiness.requiredSetup[0]?.detail || 'This desktop is not ready to start assistant work yet.';
         setMessages((prev) => [
           ...prev,
           createChatItem(
@@ -1728,6 +1729,7 @@ function App() {
     localSettings,
     workspaceConfigured: workspaceState.configured,
     providerConfigured,
+    isManagedLocalProvider: llmSettings.provider === DEFAULT_LLM_PROVIDER,
   });
   const taskReadiness = evaluateDesktopTaskReadiness({
     mode: 'ai_assist',
@@ -1736,6 +1738,7 @@ function App() {
     localSettings,
     workspaceConfigured: workspaceState.configured,
     providerConfigured,
+    isManagedLocalProvider: llmSettings.provider === DEFAULT_LLM_PROVIDER,
   });
   const showFreeAiSetup =
     isSignedIn
@@ -1749,7 +1752,7 @@ function App() {
     ? localAiInstallProgress?.message
         || localAiRecommendation?.reason
         || 'Set up Free AI to prepare the local assistant for this desktop.'
-    : assistantReadiness.blockers[0]?.detail || 'Open settings or permission prompts to finish setup.';
+    : assistantReadiness.requiredSetup[0]?.detail || 'Open settings or permission prompts to finish setup.';
   const overlayStatusLabel = aiState?.status === 'paused'
     ? 'GORKH is paused.'
     : aiState?.status === 'awaiting_approval'
@@ -2026,7 +2029,7 @@ function App() {
                       color: assistantReadiness.ready ? '#166534' : '#9a3412',
                     }}
                   >
-                    {assistantReadiness.ready ? 'Ready to work' : 'Setup needed'}
+                    {assistantReadiness.ready ? 'Ready to use' : 'Setup needed'}
                   </span>
                   <span
                     style={{
@@ -2040,7 +2043,7 @@ function App() {
                       color: '#1d4ed8',
                     }}
                   >
-                    Provider: {getLlmProviderLabel(llmSettings.provider)}
+                    Assistant engine: {llmSettings.provider === DEFAULT_LLM_PROVIDER ? 'Free AI' : getLlmProviderLabel(llmSettings.provider)}
                   </span>
                   <span
                     style={{
@@ -2099,7 +2102,7 @@ function App() {
                         disabled={localAiActionBusy}
                         style={{ padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: localAiActionBusy ? 'not-allowed' : 'pointer' }}
                       >
-                        {localAiActionBusy ? 'Preparing Free AI...' : 'Start Free AI'}
+                        {localAiActionBusy ? 'Preparing Free AI...' : 'Set Up Free AI'}
                       </button>
                     )}
                     <button
@@ -2108,12 +2111,12 @@ function App() {
                     >
                       Open Settings
                     </button>
-                    {(assistantReadiness.blockers.some((blocker) => blocker.id === 'screen-permission') ||
-                      assistantReadiness.blockers.some((blocker) => blocker.id === 'accessibility-permission')) && (
+                    {(assistantReadiness.requiredSetup.some((item) => item.id === 'screen-permission') ||
+                      assistantReadiness.requiredSetup.some((item) => item.id === 'accessibility-permission')) && (
                       <button
                         onClick={() =>
                           void handleOpenPermissionSettings(
-                            assistantReadiness.blockers.some((blocker) => blocker.id === 'screen-permission')
+                            assistantReadiness.requiredSetup.some((item) => item.id === 'screen-permission')
                               ? 'screenRecording'
                               : 'accessibility'
                           )
@@ -2187,7 +2190,7 @@ function App() {
                 border: '1px solid #e5e7eb',
               }}
             >
-              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#1f2937' }}>Settings & details</summary>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#1f2937' }}>Advanced</summary>
               <div style={{ marginTop: '1rem' }}>
                 <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
                   <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>
@@ -2223,7 +2226,7 @@ function App() {
                   </button>
                 </div>
                 <p style={{ margin: '0 0 1rem', fontSize: '0.8125rem', color: '#6b7280', maxWidth: '72ch' }}>
-                  The assistant chat is the primary product surface. This area keeps setup, devices, screen tools, and debug fallback controls out of the way unless you need them.
+                  The assistant chat is the primary product surface. This area keeps setup details, device tools, screen controls, and diagnostics out of the way unless you need them.
                 </p>
 
                 <div
@@ -2236,7 +2239,7 @@ function App() {
                   <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
                     <h2 style={{ margin: 0, fontSize: '1rem' }}>Setup status</h2>
                     <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-                      Subscription, permissions, workspace, and provider state for this desktop.
+                      Subscription, permissions, workspace, and local engine state for this desktop.
                     </p>
 
                     {desktopBootstrapBusy && (
@@ -2284,7 +2287,15 @@ function App() {
                         <strong>Workspace:</strong> {workspaceState.configured ? workspaceState.rootName || 'Configured' : 'Not configured'}
                       </div>
                       <div style={{ fontSize: '0.875rem' }}>
-                        <strong>Provider:</strong> {providerCheckBusy ? 'Checking...' : providerConfigured ? 'Configured' : 'Not configured'}
+                        <strong>Assistant engine:</strong> {providerCheckBusy
+                          ? 'Checking...'
+                          : llmSettings.provider === DEFAULT_LLM_PROVIDER
+                            ? providerConfigured
+                              ? 'Free AI ready'
+                              : 'Free AI not ready'
+                            : providerConfigured
+                              ? 'Custom model ready'
+                              : 'Custom model not ready'}
                       </div>
                     </div>
 
@@ -2301,12 +2312,12 @@ function App() {
                     >
                       {taskReadiness.ready
                         ? 'This desktop is ready to launch work directly.'
-                        : `Launching work is blocked by ${taskReadiness.blockers.length} readiness item${taskReadiness.blockers.length === 1 ? '' : 's'}.`}
+                        : `Launching work is blocked by ${taskReadiness.requiredSetup.length} readiness item${taskReadiness.requiredSetup.length === 1 ? '' : 's'}.`}
                     </div>
 
-                    {taskReadiness.blockers.length > 0 && (
+                    {taskReadiness.requiredSetup.length > 0 && (
                       <div style={{ marginTop: '0.75rem', display: 'grid', gap: '0.5rem' }}>
-                        {taskReadiness.blockers.map((blocker) => (
+                        {taskReadiness.requiredSetup.map((blocker) => (
                           <div
                             key={blocker.id}
                             style={{
@@ -2349,6 +2360,20 @@ function App() {
                                   style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
                                 >
                                   Open Settings
+                                </button>
+                              )}
+                              {blocker.id === 'local-engine' && (
+                                <button
+                                  onClick={() => {
+                                    if (showFreeAiSetup) {
+                                      void handleStartFreeAi(localAiRecommendation?.tier ?? 'light');
+                                      return;
+                                    }
+                                    setSettingsOpen(true);
+                                  }}
+                                  style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                                >
+                                  {showFreeAiSetup ? 'Set Up Free AI' : 'Open Settings'}
                                 </button>
                               )}
                             </div>

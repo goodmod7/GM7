@@ -73,3 +73,74 @@ test('desktop task readiness becomes ready when local permissions, workspace, an
   assert.equal(readiness.ready, true);
   assert.deepEqual(readiness.blockers, []);
 });
+
+test('desktop retail readiness separates required setup from optional upgrades and avoids provider jargon', () => {
+  const readiness = evaluateDesktopTaskReadiness({
+    mode: 'ai_assist',
+    subscriptionStatus: 'inactive',
+    permissionStatus: {
+      screenRecording: 'denied',
+      accessibility: 'denied',
+    },
+    localSettings: {
+      startMinimizedToTray: false,
+      autostartEnabled: false,
+      screenPreviewEnabled: false,
+      allowControlEnabled: false,
+    },
+    workspaceConfigured: false,
+    providerConfigured: false,
+  }) as typeof evaluateDesktopTaskReadiness extends (...args: any[]) => infer TResult
+    ? TResult & {
+        requiredSetup?: Array<{ id: string }>;
+        optionalUpgrades?: Array<{ id: string }>;
+      }
+    : never;
+
+  assert.equal(Array.isArray(readiness.requiredSetup), true, 'retail onboarding should expose required setup items');
+  assert.equal(Array.isArray(readiness.optionalUpgrades), true, 'retail onboarding should expose optional upgrade items separately');
+  assert.deepEqual(
+    readiness.requiredSetup?.map((item) => item.id),
+    ['screen-preview', 'screen-permission', 'control-toggle', 'accessibility-permission', 'workspace', 'local-engine']
+  );
+  assert.deepEqual(
+    readiness.optionalUpgrades?.map((item) => item.id),
+    [],
+    'the free retail path should keep optional upgrades out of the required setup list'
+  );
+});
+
+test('desktop custom-provider readiness keeps paid-provider setup separate from Free AI local-engine setup', () => {
+  const readiness = evaluateDesktopTaskReadiness({
+    mode: 'ai_assist',
+    subscriptionStatus: 'active',
+    permissionStatus: {
+      screenRecording: 'granted',
+      accessibility: 'granted',
+    },
+    localSettings: {
+      startMinimizedToTray: false,
+      autostartEnabled: false,
+      screenPreviewEnabled: true,
+      allowControlEnabled: true,
+    },
+    workspaceConfigured: true,
+    providerConfigured: false,
+    isManagedLocalProvider: false,
+  }) as typeof evaluateDesktopTaskReadiness extends (...args: any[]) => infer TResult
+    ? TResult & {
+        requiredSetup?: Array<{ id: string; detail: string }>;
+      }
+    : never;
+
+  assert.deepEqual(
+    readiness.requiredSetup?.map((item) => item.id),
+    ['provider'],
+    'custom provider setup should keep its own readiness item instead of forcing Free AI local-engine setup'
+  );
+  assert.match(
+    readiness.requiredSetup?.[0]?.detail ?? '',
+    /configure a usable model provider/i,
+    'custom provider setup should direct the user back to provider configuration'
+  );
+});

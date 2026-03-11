@@ -26,6 +26,7 @@ mod workspace;
 
 // Display info structure
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DisplayInfo {
     display_id: String,
     name: Option<String>,
@@ -35,6 +36,7 @@ struct DisplayInfo {
 
 // Screen capture result
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CaptureResult {
     png_base64: String,
     width: u32,
@@ -43,6 +45,7 @@ struct CaptureResult {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CaptureError {
     message: String,
     needs_permission: bool,
@@ -50,6 +53,7 @@ struct CaptureError {
 
 // Input injection error
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct InputError {
     message: String,
     needs_permission: bool,

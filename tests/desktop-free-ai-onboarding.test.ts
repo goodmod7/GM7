@@ -31,22 +31,21 @@ test('desktop local AI helper exposes retail-friendly tier guidance and install 
   assert.equal(imported.getLocalAiInstallStageLabel('error'), 'Error');
 });
 
-test('desktop retail shell includes a visible Start Free AI onboarding surface', () => {
+test('desktop retail shell includes a visible Set Up Free AI onboarding surface', () => {
   const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
   const componentPath = 'apps/desktop/src/components/FreeAiSetupCard.tsx';
 
   assert.equal(existsSync(componentPath), true, 'free local AI onboarding component should exist');
   const componentSource = readFileSync(componentPath, 'utf8');
 
-  assert.match(appSource, /Start Free AI|Set up Free AI/i, 'main desktop shell should expose the free local AI onboarding entry point');
-  assert.match(componentSource, /Start Free AI|Set up Free AI/i);
-  assert.match(componentSource, /Light recommended/i);
-  assert.match(componentSource, /Standard recommended/i);
-  assert.match(componentSource, /Vision Boost optional/i);
-  assert.match(componentSource, /Not installed/i);
-  assert.match(componentSource, /Downloading/i);
-  assert.match(componentSource, /Installed/i);
-  assert.match(componentSource, /Starting/i);
-  assert.match(componentSource, /Ready/i);
-  assert.match(componentSource, /Error/i);
+  assert.match(appSource, /Set Up Free AI|Install local engine|Ready to use/i, 'main desktop shell should expose the free local AI onboarding entry point');
+  assert.match(componentSource, /Set Up Free AI/i);
+  assert.match(componentSource, /Recommended for this device/i);
+  assert.doesNotMatch(componentSource, /Light recommended|Standard recommended|Vision Boost optional/i);
+  assert.match(componentSource, /Check this device/i);
+  assert.match(componentSource, /Install local engine/i);
+  assert.match(componentSource, /Download AI model/i);
+  assert.match(componentSource, /Start local engine/i);
+  assert.match(componentSource, /Ready to use/i);
+  assert.match(componentSource, /Repair available/i);
 });

@@ -13,9 +13,19 @@ interface ActionApprovalModalProps {
   action: InputAction;
   onApprove: () => void;
   onDeny: () => void;
+  overlayMode?: boolean;
+  onStopAll?: () => void;
 }
 
-export function ActionApprovalModal({ approval, actionId, action, onApprove, onDeny }: ActionApprovalModalProps) {
+export function ActionApprovalModal({
+  approval,
+  actionId,
+  action,
+  onApprove,
+  onDeny,
+  overlayMode = false,
+  onStopAll,
+}: ActionApprovalModalProps) {
   // Mark as used
   useActionId(actionId);
   
@@ -76,6 +86,11 @@ export function ActionApprovalModal({ approval, actionId, action, onApprove, onD
   };
 
   const desc = getActionDescription();
+  const cardBackground = overlayMode
+    ? 'linear-gradient(180deg, rgba(5,7,10,0.94) 0%, rgba(8,10,14,0.97) 100%)'
+    : 'white';
+  const textColor = overlayMode ? '#f8fafc' : '#111827';
+  const secondaryTextColor = overlayMode ? '#cbd5e1' : '#4b5563';
 
   return (
     <div
@@ -85,7 +100,9 @@ export function ActionApprovalModal({ approval, actionId, action, onApprove, onD
         left: 0,
         right: 0,
         bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        backgroundColor: overlayMode ? 'rgba(0, 0, 0, 0.72)' : 'rgba(0, 0, 0, 0.5)',
+        backdropFilter: overlayMode ? 'blur(12px)' : undefined,
+        WebkitBackdropFilter: overlayMode ? 'blur(12px)' : undefined,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -94,16 +111,31 @@ export function ActionApprovalModal({ approval, actionId, action, onApprove, onD
     >
       <div
         style={{
-          backgroundColor: 'white',
+          background: cardBackground,
           borderRadius: '12px',
           padding: '1.5rem',
           maxWidth: '480px',
           width: '90%',
-          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+          boxShadow: overlayMode ? '0 24px 80px rgba(0, 0, 0, 0.55)' : '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+          border: overlayMode ? '1px solid rgba(255,255,255,0.10)' : 'none',
+          color: textColor,
         }}
       >
         {/* Header */}
         <div style={{ marginBottom: '1rem' }}>
+          {overlayMode && (
+            <div
+              style={{
+                marginBottom: '0.75rem',
+                fontSize: '0.76rem',
+                letterSpacing: '0.22em',
+                textTransform: 'uppercase',
+                color: '#cbd5e1',
+              }}
+            >
+              GORKH approval
+            </div>
+          )}
           <div
             style={{
               display: 'inline-flex',
@@ -131,10 +163,10 @@ export function ActionApprovalModal({ approval, actionId, action, onApprove, onD
         </div>
 
         {/* Details */}
-        <p
+          <p
           style={{
             margin: '0 0 1rem',
-            color: '#4b5563',
+            color: secondaryTextColor,
             fontSize: '0.9375rem',
             lineHeight: 1.5,
           }}
@@ -158,14 +190,34 @@ export function ActionApprovalModal({ approval, actionId, action, onApprove, onD
         )}
 
         {/* Actions */}
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {overlayMode && onStopAll && (
+            <button
+              onClick={onStopAll}
+              disabled={isSubmitting}
+              style={{
+                flexBasis: '100%',
+                padding: '0.75rem 1rem',
+                background: 'transparent',
+                color: '#fca5a5',
+                border: '1px solid rgba(248,113,113,0.28)',
+                borderRadius: '6px',
+                fontSize: '0.875rem',
+                fontWeight: 600,
+                cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                opacity: isSubmitting ? 0.7 : 1,
+              }}
+            >
+              Stop all
+            </button>
+          )}
           <button
             onClick={handleDeny}
             disabled={isSubmitting}
             style={{
               flex: 1,
               padding: '0.75rem 1rem',
-              backgroundColor: 'white',
+              backgroundColor: overlayMode ? 'rgba(255,255,255,0.03)' : 'white',
               color: '#dc2626',
               border: '1px solid #dc2626',
               borderRadius: '6px',
@@ -183,7 +235,7 @@ export function ActionApprovalModal({ approval, actionId, action, onApprove, onD
             style={{
               flex: 1,
               padding: '0.75rem 1rem',
-              backgroundColor: '#10b981',
+              background: overlayMode ? 'linear-gradient(180deg, rgba(16,185,129,0.92), rgba(5,150,105,0.94))' : '#10b981',
               color: 'white',
               border: 'none',
               borderRadius: '6px',

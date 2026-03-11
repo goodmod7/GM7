@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Operator Desktop",
+  "productName": "GORKH",
   "version": "0.0.6",
   "identifier": "com.ai-operator.desktop",
   "build": {
@@ -15,7 +15,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "AI Operator Desktop",
+        "title": "GORKH",
         "width": 1200,
         "height": 800,
         "resizable": true,

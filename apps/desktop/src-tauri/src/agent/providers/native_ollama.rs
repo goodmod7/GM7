@@ -93,6 +93,11 @@ impl NativeOllamaProvider {
                 .to_string(),
         })
     }
+
+    fn model_supports_vision(&self) -> bool {
+        let normalized = self.model.trim().to_ascii_lowercase();
+        normalized.contains("vl") || normalized.contains("vision") || normalized.contains("llava")
+    }
 }
 
 #[async_trait]
@@ -102,7 +107,7 @@ impl LlmProvider for NativeOllamaProvider {
     }
 
     fn name(&self) -> &str {
-        "AI Operator Native (Qwen via Ollama)"
+        "GORKH Native (Qwen via Ollama)"
     }
 
     async fn is_available(&self) -> bool {
@@ -116,7 +121,7 @@ impl LlmProvider for NativeOllamaProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            supports_vision: true, // Qwen2.5-VL supports vision
+            supports_vision: self.model_supports_vision(),
             supports_streaming: true,
             supports_functions: false,
             max_context_tokens: 32768,

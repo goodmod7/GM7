@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -14,14 +14,17 @@ import {
   type NativePermissionStatus,
   type PermissionTarget,
 } from '../lib/permissions.js';
-
-export type LlmProvider = 'openai' | 'openai_compat';
-
-export interface LlmSettings {
-  provider: LlmProvider;
-  baseUrl: string;
-  model: string;
-}
+import {
+  getLlmDefaults,
+  getLlmProviderDefinition,
+  getLlmProviderLabel,
+  getSupportedLlmProviders,
+  isPaidLlmProvider,
+  providerRequiresApiKey,
+  type LlmProvider,
+  type LlmSettings,
+} from '../lib/llmConfig.js';
+import { BrandWordmark } from './BrandWordmark.js';
 
 export type WorkspaceState = LocalWorkspaceState;
 
@@ -30,6 +33,8 @@ const UPDATER_ENABLED = import.meta.env.VITE_DESKTOP_UPDATER_ENABLED === 'true';
 interface SettingsPanelProps {
   isOpen: boolean;
   onClose: () => void;
+  llmSettings: LlmSettings;
+  onLlmSettingsChange: (settings: LlmSettings) => void;
   localSettings: LocalSettingsState;
   autostartSupported: boolean;
   autostartBusy?: boolean;
@@ -54,6 +59,8 @@ interface SettingsPanelProps {
 export function SettingsPanel({
   isOpen,
   onClose,
+  llmSettings,
+  onLlmSettingsChange,
   localSettings,
   autostartSupported,
   autostartBusy = false,
@@ -74,23 +81,9 @@ export function SettingsPanel({
   onExportDiagnostics,
   diagnosticsStatus,
 }: SettingsPanelProps) {
-  const [settings, setSettings] = useState<LlmSettings>({
-    provider: 'openai',
-    baseUrl: 'https://api.openai.com',
-    model: 'gpt-4.1-mini',
-  });
-  
-  // Provider-specific defaults
-  const providerDefaults: Record<LlmProvider, Partial<LlmSettings>> = {
-    openai: {
-      baseUrl: 'https://api.openai.com',
-      model: 'gpt-4.1-mini',
-    },
-    openai_compat: {
-      baseUrl: 'http://127.0.0.1:8000',
-      model: 'qwen2.5-7b-instruct',
-    },
-  };
+  const settings = llmSettings;
+  const providerDefinition = getLlmProviderDefinition(settings.provider);
+  const supportedProviders = getSupportedLlmProviders();
   const [apiKey, setApiKey] = useState('');
   const [hasKey, setHasKey] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -103,26 +96,14 @@ export function SettingsPanel({
   const screenRecordingInstructions = getPermissionInstructions('screenRecording');
   const accessibilityInstructions = getPermissionInstructions('accessibility');
 
-  // Load settings from localStorage on mount
   useEffect(() => {
-    const saved = localStorage.getItem('ai-operator-settings');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as LlmSettings;
-        // Merge with defaults for the saved provider
-        const defaults = providerDefaults[parsed.provider] || providerDefaults.openai;
-        setSettings((s) => ({ ...s, ...defaults, ...parsed }));
-      } catch {
-        // Ignore parse errors, use defaults
-      }
-    }
-
-    // Check if API key exists
-    checkApiKey();
-    
     // Load workspace state
-    loadWorkspaceState();
+    void loadWorkspaceState();
   }, []);
+
+  useEffect(() => {
+    void checkApiKey(settings.provider);
+  }, [settings.provider]);
   
   // Load workspace state from Rust
   const loadWorkspaceState = async () => {
@@ -169,24 +150,18 @@ export function SettingsPanel({
   const checkApiKey = async (provider?: LlmProvider) => {
     const providerToCheck = provider || settings.provider;
     try {
-      // For openai_compat, we don't require a key by default
-      if (providerToCheck === 'openai_compat') {
-        // Check if user has explicitly set a key (optional for local)
-        const has = await invoke<boolean>('has_llm_api_key', { provider: providerToCheck });
-        setHasKey(has);
-      } else {
-        const has = await invoke<boolean>('has_llm_api_key', { provider: providerToCheck });
-        setHasKey(has);
+      if (!providerRequiresApiKey(providerToCheck)) {
+        setHasKey(false);
+        return;
       }
+
+      const has = await invoke<boolean>('has_llm_api_key', { provider: providerToCheck });
+      setHasKey(has);
     } catch (e) {
       console.error('Failed to check API key:', e);
       setHasKey(false);
     }
   };
-
-  const saveSettings = useCallback(() => {
-    localStorage.setItem('ai-operator-settings', JSON.stringify(settings));
-  }, [settings]);
 
   const handleSaveKey = async () => {
     if (!apiKey.trim()) return;
@@ -233,7 +208,7 @@ export function SettingsPanel({
 
     try {
       // For cloud providers, check if key exists
-      if (settings.provider !== 'openai_compat') {
+      if (providerRequiresApiKey(settings.provider)) {
         const has = await invoke<boolean>('has_llm_api_key', { provider: settings.provider });
         if (!has) {
           setTestResult({ success: false, message: 'No API key configured. Please enter and save your key first.' });
@@ -269,9 +244,11 @@ export function SettingsPanel({
       } else if (msg.includes('CONNECTION_FAILED') || msg.includes('Connection refused') || msg.includes('Failed to connect')) {
         setTestResult({ 
           success: false, 
-          message: settings.provider === 'openai_compat' 
-            ? 'Local server not reachable. Ensure your local LLM server is running at ' + settings.baseUrl + ' and try again.'
-            : `Connection failed: ${msg}`
+          message: settings.provider === 'native_qwen_ollama'
+            ? `Free AI is not ready at ${settings.baseUrl}. Use Start Free AI in the main assistant view, or ensure your existing local Ollama service is running with ${settings.model}.`
+            : settings.provider === 'openai_compat'
+              ? 'Local server not reachable. Ensure your local LLM server is running at ' + settings.baseUrl + ' and try again.'
+              : `Connection failed: ${msg}`
         });
       } else if (msg.includes('TIMEOUT')) {
         setTestResult({ 
@@ -373,10 +350,9 @@ export function SettingsPanel({
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-          <h2 style={{ margin: 0 }}>Settings</h2>
+          <BrandWordmark width={150} subtitle="Desktop settings" />
           <button
             onClick={() => {
-              saveSettings();
               onClose();
             }}
             style={{
@@ -397,7 +373,7 @@ export function SettingsPanel({
             🤖 AI Assist Configuration
           </h3>
           <p style={{ margin: '0 0 1rem', fontSize: '0.875rem', color: '#666' }}>
-            Configure your LLM provider for AI Assist mode. Your API key is stored securely in the OS keychain and never sent to the server.
+            Configure the assistant model. Local Qwen via Ollama is the free default. API keys stay in the OS keychain and are never sent to the server.
           </p>
 
           {/* Provider */}
@@ -409,14 +385,7 @@ export function SettingsPanel({
               value={settings.provider}
               onChange={(e) => {
                 const newProvider = e.target.value as LlmProvider;
-                // Apply defaults for the selected provider
-                const defaults = providerDefaults[newProvider];
-                setSettings((s) => ({ 
-                  ...s, 
-                  provider: newProvider,
-                  ...defaults,
-                }));
-                // Check API key status for new provider
+                onLlmSettingsChange(getLlmDefaults(newProvider));
                 void checkApiKey(newProvider);
               }}
               style={{
@@ -427,8 +396,12 @@ export function SettingsPanel({
                 fontSize: '0.875rem',
               }}
             >
-              <option value="openai">OpenAI (cloud, requires API key)</option>
-              <option value="openai_compat">Local (OpenAI-compatible) — Qwen, etc.</option>
+              {supportedProviders.map((provider) => (
+                <option key={provider.provider} value={provider.provider}>
+                  {provider.label}
+                  {provider.paid ? ' (paid)' : provider.provider === 'native_qwen_ollama' ? ' (free default)' : ''}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -440,8 +413,8 @@ export function SettingsPanel({
             <input
               type="text"
               value={settings.baseUrl}
-              onChange={(e) => setSettings((s) => ({ ...s, baseUrl: e.target.value }))}
-              placeholder="https://api.openai.com"
+              onChange={(e) => onLlmSettingsChange({ ...settings, baseUrl: e.target.value })}
+              placeholder={providerDefinition.baseUrl}
               style={{
                 width: '100%',
                 padding: '0.5rem',
@@ -460,8 +433,8 @@ export function SettingsPanel({
             <input
               type="text"
               value={settings.model}
-              onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
-              placeholder="gpt-4.1-mini"
+              onChange={(e) => onLlmSettingsChange({ ...settings, model: e.target.value })}
+              placeholder={providerDefinition.model}
               style={{
                 width: '100%',
                 padding: '0.5rem',
@@ -471,14 +444,12 @@ export function SettingsPanel({
               }}
             />
             <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-              {settings.provider === 'openai' 
-                ? 'Examples: gpt-4.1-mini, gpt-4.1, gpt-4o'
-                : 'Examples: qwen2.5-7b-instruct, llama-3.2-8b-instruct'}
+              Default: {providerDefinition.model}
             </p>
           </div>
 
           {/* API Key - only show for cloud providers */}
-          {settings.provider !== 'openai_compat' && (
+          {providerRequiresApiKey(settings.provider) && (
           <div style={{ marginBottom: '1rem' }}>
             <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem', color: '#333' }}>
               API Key {hasKey && <span style={{ color: '#10b981' }}>✓ Saved</span>}
@@ -535,8 +506,44 @@ export function SettingsPanel({
             </p>
           </div>
           )}
+
+          {isPaidLlmProvider(settings.provider) && (
+            <div
+              style={{
+                marginBottom: '1rem',
+                padding: '0.75rem',
+                backgroundColor: '#fff7ed',
+                border: '1px solid #fdba74',
+                borderRadius: '4px',
+                fontSize: '0.875rem',
+                color: '#9a3412',
+              }}
+            >
+              <strong>Paid provider</strong>
+              <p style={{ margin: '0.5rem 0 0', fontSize: '0.8rem' }}>
+                {providerDefinition.billingHint || 'Charges may apply on your provider account. Keep the selected model aligned with your budget.'}
+              </p>
+            </div>
+          )}
           
           {/* Local server note */}
+          {settings.provider === 'native_qwen_ollama' && (
+            <div style={{ 
+              marginBottom: '1rem', 
+              padding: '0.75rem', 
+              backgroundColor: '#ecfeff', 
+              border: '1px solid #a5f3fc',
+              borderRadius: '4px',
+              fontSize: '0.875rem',
+              color: '#155e75',
+            }}>
+              <strong>{getLlmProviderLabel(settings.provider)} setup</strong>
+              <p style={{ margin: '0.5rem 0 0', fontSize: '0.8rem' }}>
+                Install and start Ollama, then run <code>ollama pull {settings.model}</code>. The desktop will connect directly to your local Ollama server at {settings.baseUrl}.
+              </p>
+            </div>
+          )}
+
           {settings.provider === 'openai_compat' && (
             <div style={{ 
               marginBottom: '1rem', 
@@ -555,18 +562,56 @@ export function SettingsPanel({
             </div>
           )}
 
+          {(settings.provider === 'deepseek' || settings.provider === 'minimax' || settings.provider === 'kimi') && (
+            <div
+              style={{
+                marginBottom: '1rem',
+                padding: '0.75rem',
+                backgroundColor: '#eff6ff',
+                border: '1px solid #bfdbfe',
+                borderRadius: '4px',
+                fontSize: '0.875rem',
+                color: '#1d4ed8',
+              }}
+            >
+              <strong>{providerDefinition.label} compatibility</strong>
+              <p style={{ margin: '0.5rem 0 0', fontSize: '0.8rem' }}>
+                {providerDefinition.setupHint} The desktop uses your configured base URL and API key directly; no provider traffic is proxied through the server.
+              </p>
+            </div>
+          )}
+
+          {settings.provider === 'claude' && (
+            <div
+              style={{
+                marginBottom: '1rem',
+                padding: '0.75rem',
+                backgroundColor: '#f8fafc',
+                border: '1px solid #cbd5e1',
+                borderRadius: '4px',
+                fontSize: '0.875rem',
+                color: '#334155',
+              }}
+            >
+              <strong>{providerDefinition.label} setup</strong>
+              <p style={{ margin: '0.5rem 0 0', fontSize: '0.8rem' }}>
+                {providerDefinition.setupHint} The desktop uses Anthropic&apos;s Messages API directly from the local app.
+              </p>
+            </div>
+          )}
+
           {/* Test Button */}
           <button
             onClick={handleTest}
-            disabled={isLoading || (settings.provider !== 'openai_compat' && !hasKey)}
+            disabled={isLoading || (providerRequiresApiKey(settings.provider) && !hasKey)}
             style={{
               width: '100%',
               padding: '0.75rem',
-              backgroundColor: (settings.provider === 'openai_compat' || hasKey) ? '#10b981' : '#ccc',
+              backgroundColor: (!providerRequiresApiKey(settings.provider) || hasKey) ? '#10b981' : '#ccc',
               color: 'white',
               border: 'none',
               borderRadius: '4px',
-              cursor: (settings.provider === 'openai_compat' || hasKey) ? 'pointer' : 'not-allowed',
+              cursor: (!providerRequiresApiKey(settings.provider) || hasKey) ? 'pointer' : 'not-allowed',
               fontSize: '0.875rem',
               fontWeight: 500,
             }}
@@ -989,11 +1034,10 @@ export function SettingsPanel({
         </div>
 
         {/* Close button */}
-        <button
-          onClick={() => {
-            saveSettings();
-            onClose();
-          }}
+              <button
+                onClick={() => {
+                  onClose();
+                }}
           style={{
             width: '100%',
             padding: '0.75rem',

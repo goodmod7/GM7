@@ -264,6 +264,19 @@ pub fn tool_execute(tool_call: ToolCall) -> ToolResult {
     }
 }
 
+pub fn tool_execute_for_agent(tool_call: ToolCall) -> Result<String, String> {
+    let result = tool_execute(tool_call);
+
+    if result.ok {
+        return Ok("Tool executed successfully.".to_string());
+    }
+
+    Err(result
+        .error
+        .map(|error| error.message)
+        .unwrap_or_else(|| "Tool execution failed".to_string()))
+}
+
 fn execute_fs_list(path: &str) -> ToolResult {
     let resolved = match resolve_workspace_path(path) {
         Ok(p) => p,

@@ -1,5 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { WsClient } from './wsClient.js';
+import {
+  providerRequiresApiKey,
+  type LlmProvider,
+  type LlmSettings,
+} from './llmConfig.js';
+import { taskLikelyNeedsVision, type LocalAiRuntimeStatus } from './localAi.js';
 import type { 
   AgentProposal, 
   InputAction, 
@@ -33,12 +39,6 @@ export interface AiAssistState {
   logs: LogLine[];
 }
 
-export interface LlmSettings {
-  provider: 'openai' | 'openai_compat';
-  baseUrl: string;
-  model: string;
-}
-
 export interface LocalToolEvent extends ToolSummary {
   rationale?: string;
   preview?: {
@@ -58,9 +58,35 @@ interface ExecutionResult {
   error?: string;
 }
 
+function modelSupportsVision(provider: LlmProvider, model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  if (provider === 'claude') {
+    return true;
+  }
+
+  if (provider === 'openai') {
+    return normalized.includes('gpt-4o') || normalized.includes('vision');
+  }
+
+  return normalized.includes('vl') || normalized.includes('vision') || normalized.includes('llava');
+}
+
 // Helper function to check if LLM provider is configured
-export async function hasLlMProviderConfigured(provider: string): Promise<boolean> {
-  if (provider === 'openai_compat') {
+export async function hasLlMProviderConfigured(provider: LlmProvider): Promise<boolean> {
+  if (provider === 'native_qwen_ollama') {
+    try {
+      const status = await invoke<LocalAiRuntimeStatus>('local_ai_status');
+      return status.runtimeRunning && (Boolean(status.selectedModel) || status.externalServiceDetected);
+    } catch {
+      return false;
+    }
+  }
+
+  if (!providerRequiresApiKey(provider)) {
     return true;
   }
 
@@ -634,7 +660,7 @@ export class AiAssistController {
         this.state.status = 'capturing';
         this.notifyStateChange();
 
-        const screenshot = await this.captureScreenshot();
+        const screenshot = await this.captureScreenshotForTask(settings);
 
         if (this.paused) {
           return;
@@ -736,6 +762,18 @@ export class AiAssistController {
       console.warn('[AiAssist] Screenshot failed:', e);
       return null;
     }
+  }
+
+  private async captureScreenshotForTask(settings: LlmSettings): Promise<string | null> {
+    if (!taskLikelyNeedsVision(this.options.goal)) {
+      return null;
+    }
+
+    if (!modelSupportsVision(settings.provider, settings.model)) {
+      throw new Error('This task needs Vision Boost or a vision-capable model before the assistant can inspect the screen.');
+    }
+
+    return this.captureScreenshot();
   }
 
   private async getLlmProposal(settings: LlmSettings, screenshot: string | null): Promise<AgentProposal> {

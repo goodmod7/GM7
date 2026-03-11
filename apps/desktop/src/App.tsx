@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { ServerMessage, ServerChatMessage, RunWithSteps, ApprovalRequest, InputAction, AgentProposal, RunMode } from '@ai-operator/shared';
+import type { ServerMessage, ServerChatMessage, RunWithSteps, ApprovalRequest, InputAction, AgentProposal } from '@ai-operator/shared';
 import { WsClient, type ConnectionStatus } from './lib/wsClient.js';
 import { executeAction } from './lib/actionExecutor.js';
 import {
@@ -14,11 +14,57 @@ import {
   type ApprovalChangeEvent,
   type ApprovalItem,
 } from './lib/approvals.js';
-import { AiAssistController, hasLlMProviderConfigured, type LlmSettings, type LocalToolEvent } from './lib/aiAssist.js';
+import { hasLlMProviderConfigured, type LocalToolEvent } from './lib/aiAssist.js';
+import {
+  createAssistantEngine,
+  DEFAULT_ASSISTANT_ENGINE_ID,
+  getAssistantEngineCatalog,
+  type AssistantEngineHandle,
+  type AssistantEngineId,
+  type AssistantEngineState,
+} from './lib/assistantEngine.js';
+import {
+  DEFAULT_LLM_PROVIDER,
+  getLlmDefaults,
+  getLlmProviderLabel,
+  mergeLlmSettings,
+  type LlmSettings,
+} from './lib/llmConfig.js';
 import { desktopRuntimeConfig } from './lib/desktopRuntimeConfig.js';
 import { logoutDesktopSession, startDesktopSignIn } from './lib/desktopAuth.js';
 import { getDesktopAccount, revokeDesktopDevice, type DesktopAccountSnapshot } from './lib/desktopAccount.js';
-import { createDesktopRun, getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
+import { getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
+import { ensureAssistantRunForMessage } from './lib/chatTaskFlow.js';
+import {
+  enableLocalAiVisionBoost,
+  getLocalAiHardwareProfile,
+  getLocalAiInstallProgress,
+  getLocalAiRecommendedTier,
+  getLocalAiStatus,
+  isLocalAiInstallActive,
+  resolveManagedLocalLlmBinding,
+  resolveManagedLocalTaskBinding,
+  startLocalAiInstall,
+  type LocalAiHardwareProfile,
+  type LocalAiInstallProgress,
+  type LocalAiRuntimeStatus,
+  type LocalAiTier,
+  type LocalAiTierRecommendation,
+} from './lib/localAi.js';
+import {
+  canStartManagedLocalTask,
+  getLocalAiPlanPolicy,
+  getTodayUsageKey,
+  readLocalAiTaskUsage,
+  recordManagedLocalTaskStart,
+  type LocalAiTaskUsage,
+} from './lib/localPlan.js';
+import {
+  enterOverlayMode,
+  exitOverlayMode,
+  getOverlayModeStatus,
+  type OverlayModeStatus,
+} from './lib/overlayMode.js';
 import {
   getPermissionStatus,
   openPermissionSettings,
@@ -35,9 +81,12 @@ import { ScreenPanel } from './components/ScreenPanel.js';
 import { ControlPanel } from './components/ControlPanel.js';
 import { ActionApprovalModal } from './components/ActionApprovalModal.js';
 import { SettingsPanel } from './components/SettingsPanel.js';
-import { AgentWorkflow } from './components/AgentWorkflow.js';
 import { ToolApprovalModal } from './components/ToolApprovalModal.js';
-import { AgentTaskDialog } from './components/agent/index.js';
+import { FreeAiSetupCard } from './components/FreeAiSetupCard.js';
+import { BrandWordmark } from './components/BrandWordmark.js';
+import { ActiveOverlayShell } from './components/ActiveOverlayShell.js';
+import { OverlayController } from './components/OverlayController.js';
+import { OverlayDetailsPanel } from './components/OverlayDetailsPanel.js';
 
 // Get or create a stable device ID
 function getOrCreateDeviceId(): string {
@@ -124,31 +173,6 @@ const DEFAULT_PERMISSION_STATUS: NativePermissionStatus = {
   accessibility: 'unknown',
 };
 
-function getLlmDefaults(provider: LlmSettings['provider']): LlmSettings {
-  if (provider === 'openai_compat') {
-    return {
-      provider,
-      baseUrl: 'http://127.0.0.1:8000',
-      model: 'qwen2.5-7b-instruct',
-    };
-  }
-
-  return {
-    provider: 'openai',
-    baseUrl: 'https://api.openai.com',
-    model: 'gpt-4.1-mini',
-  };
-}
-
-function mergeLlmSettings(input?: Partial<LlmSettings>): LlmSettings {
-  const provider = input?.provider === 'openai_compat' ? 'openai_compat' : 'openai';
-  return {
-    ...getLlmDefaults(provider),
-    ...input,
-    provider,
-  };
-}
-
 function persistLlmSettings(settings: LlmSettings): void {
   localStorage.setItem(LLM_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
 }
@@ -167,6 +191,15 @@ function getNextPendingApproval(items: ApprovalItem[], kind: ApprovalItem['kind'
   return pending[0] || null;
 }
 
+function createChatItem(role: ChatItem['role'], text: string, timestamp: number = Date.now()): ChatItem {
+  return {
+    id: `${timestamp}-${Math.random()}`,
+    role,
+    text,
+    timestamp,
+  };
+}
+
 function App() {
   const [client, setClient] = useState<WsClient | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>(desktopRuntimeConfig.ok ? 'disconnected' : 'error');
@@ -182,10 +215,6 @@ function App() {
   const [desktopAccountBusy, setDesktopAccountBusy] = useState(false);
   const [desktopAccountError, setDesktopAccountError] = useState<string | null>(null);
   const [deviceRevokeBusyId, setDeviceRevokeBusyId] = useState<string | null>(null);
-  const [taskGoal, setTaskGoal] = useState('');
-  const [taskMode, setTaskMode] = useState<RunMode>('ai_assist');
-  const [taskCreateBusy, setTaskCreateBusy] = useState(false);
-  const [taskCreateError, setTaskCreateError] = useState<string | null>(null);
   const [recentRuns, setRecentRuns] = useState<RunWithSteps[]>([]);
   const [localSettings, setLocalSettingsState] = useState<LocalSettingsState>(() => getSettings());
   const [autostartSupported, setAutostartSupported] = useState(false);
@@ -208,18 +237,33 @@ function App() {
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<string | null>(null);
 
   // Iteration 6: AI Assist state
-  const [aiController, setAiController] = useState<AiAssistController | null>(null);
-  const aiControllerRef = useRef<AiAssistController | null>(null);
-  const [aiState, setAiState] = useState<AiAssistController['state'] | null>(null);
+  const assistantEngineCatalog = getAssistantEngineCatalog();
+  const [assistantEngineId, setAssistantEngineId] = useState<AssistantEngineId>(DEFAULT_ASSISTANT_ENGINE_ID);
+  const [assistantEngine, setAssistantEngine] = useState<AssistantEngineHandle | null>(null);
+  const assistantEngineRef = useRef<AssistantEngineHandle | null>(null);
+  const [aiState, setAiState] = useState<AssistantEngineState | null>(null);
   const [currentProposal, setCurrentProposal] = useState<AgentProposal | undefined>(undefined);
-  const [llmSettings, setLlmSettings] = useState<LlmSettings>(() => getLlmDefaults('openai'));
+  const [llmSettings, setLlmSettings] = useState<LlmSettings>(() => getLlmDefaults(DEFAULT_LLM_PROVIDER));
   const [providerConfigured, setProviderConfigured] = useState(false);
   const [providerCheckBusy, setProviderCheckBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [agentWorkflowOpen, setAgentWorkflowOpen] = useState(false);
   const [primaryDisplayId, setPrimaryDisplayId] = useState<string>('display-0');
   const [workspaceState, setWorkspaceState] = useState<LocalWorkspaceState>({ configured: false });
   const [toolHistoryByRun, setToolHistoryByRun] = useState<Record<string, LocalToolEvent[]>>({});
+  const [localAiStatus, setLocalAiStatus] = useState<LocalAiRuntimeStatus | null>(null);
+  const [localAiInstallProgress, setLocalAiInstallProgress] = useState<LocalAiInstallProgress | null>(null);
+  const [localAiHardwareProfile, setLocalAiHardwareProfile] = useState<LocalAiHardwareProfile | null>(null);
+  const [localAiRecommendation, setLocalAiRecommendation] = useState<LocalAiTierRecommendation | null>(null);
+  const [localAiBusy, setLocalAiBusy] = useState(false);
+  const [localAiActionBusy, setLocalAiActionBusy] = useState(false);
+  const [localAiError, setLocalAiError] = useState<string | null>(null);
+  const [localAiTaskUsage, setLocalAiTaskUsage] = useState<LocalAiTaskUsage>(() => ({
+    dayKey: getTodayUsageKey(),
+    tasksStarted: 0,
+  }));
+  const [overlayModeStatus, setOverlayModeStatus] = useState<OverlayModeStatus | null>(null);
+  const [overlayDetailsOpen, setOverlayDetailsOpen] = useState(false);
+  const [visionBoostRequested, setVisionBoostRequested] = useState(false);
   const controlEnabledRef = useRef(localSettings.allowControlEnabled);
   const workspaceConfiguredRef = useRef(workspaceState.configured);
   const clientRef = useRef<WsClient | null>(null);
@@ -240,6 +284,41 @@ function App() {
       setPermissionStatusBusy(false);
     }
   }, []);
+
+  const refreshLocalAiState = useCallback(async () => {
+    setLocalAiBusy(true);
+    setLocalAiError(null);
+    try {
+      const [statusPayload, progressPayload, hardwarePayload, recommendationPayload] = await Promise.all([
+        getLocalAiStatus(),
+        getLocalAiInstallProgress(),
+        getLocalAiHardwareProfile(),
+        getLocalAiRecommendedTier(),
+      ]);
+      setLocalAiStatus(statusPayload);
+      setLocalAiInstallProgress(progressPayload);
+      setLocalAiHardwareProfile(hardwarePayload);
+      setLocalAiRecommendation(recommendationPayload);
+      const configured = await hasLlMProviderConfigured(llmSettings.provider);
+      setProviderConfigured(configured);
+    } catch (err) {
+      setLocalAiError(err instanceof Error ? err.message : 'Failed to load Free AI status');
+    } finally {
+      setLocalAiBusy(false);
+    }
+  }, [llmSettings.provider]);
+
+  const refreshProviderConfigured = useCallback(async () => {
+    setProviderCheckBusy(true);
+    try {
+      const configured = await hasLlMProviderConfigured(llmSettings.provider);
+      setProviderConfigured(configured);
+    } catch {
+      setProviderConfigured(false);
+    } finally {
+      setProviderCheckBusy(false);
+    }
+  }, [llmSettings.provider]);
 
   const notePermissionIssue = useCallback((target: PermissionTarget, message: string) => {
     setPermissionHintTarget(target);
@@ -322,7 +401,7 @@ function App() {
           !item.error.includes('Screen Preview disabled') &&
           !item.error.includes('AI Assist paused') &&
           !item.error.includes('AI Assist stopped'));
-      aiControllerRef.current?.dismissPendingProposal(
+      assistantEngineRef.current?.dismissPendingProposal(
         item.state === 'denied'
           ? 'User denied the pending proposal'
           : item.state === 'expired'
@@ -337,8 +416,8 @@ function App() {
   }, []);
 
   useEffect(() => {
-    aiControllerRef.current = aiController;
-  }, [aiController]);
+    assistantEngineRef.current = assistantEngine;
+  }, [assistantEngine]);
 
   useEffect(() => {
     clientRef.current = client;
@@ -359,34 +438,17 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
-    if (llmSettings.provider === 'openai_compat') {
-      setProviderConfigured(true);
-      setProviderCheckBusy(false);
-      return;
-    }
-
-    setProviderCheckBusy(true);
-    void hasLlMProviderConfigured(llmSettings.provider)
-      .then((configured) => {
-        if (!cancelled) {
-          setProviderConfigured(configured);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setProviderConfigured(false);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setProviderCheckBusy(false);
-        }
-      });
+    void refreshProviderConfigured().catch(() => {
+      if (!cancelled) {
+        setProviderConfigured(false);
+        setProviderCheckBusy(false);
+      }
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [llmSettings.provider]);
+  }, [refreshProviderConfigured, localAiStatus?.runtimeRunning]);
 
   useEffect(() => {
     setLocalSettingsState(getSettings());
@@ -399,6 +461,91 @@ function App() {
   useEffect(() => {
     void refreshPermissionStatus();
   }, [refreshPermissionStatus]);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setLocalAiStatus(null);
+      setLocalAiInstallProgress(null);
+      setLocalAiHardwareProfile(null);
+      setLocalAiRecommendation(null);
+      setLocalAiBusy(false);
+      setLocalAiActionBusy(false);
+      setLocalAiError(null);
+      setLocalAiTaskUsage({
+        dayKey: getTodayUsageKey(),
+        tasksStarted: 0,
+      });
+      setVisionBoostRequested(false);
+      return;
+    }
+
+    setLocalAiTaskUsage(readLocalAiTaskUsage(window.localStorage));
+    void refreshLocalAiState();
+  }, [isSignedIn, refreshLocalAiState]);
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      return undefined;
+    }
+
+    const currentStage = localAiInstallProgress?.stage ?? localAiStatus?.installStage;
+    if (!isLocalAiInstallActive(currentStage)) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshLocalAiState();
+    }, 2000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [isSignedIn, localAiInstallProgress?.stage, localAiStatus?.installStage, refreshLocalAiState]);
+
+  useEffect(() => {
+    if (currentProposal?.kind !== 'ask_user') {
+      return;
+    }
+
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === 'agent' && last.text === currentProposal.question) {
+        return prev;
+      }
+      return [...prev, createChatItem('agent', currentProposal.question)];
+    });
+  }, [currentProposal]);
+
+  useEffect(() => {
+    if (llmSettings.provider !== DEFAULT_LLM_PROVIDER) {
+      return;
+    }
+
+    const binding = resolveManagedLocalLlmBinding(localAiStatus, localAiRecommendation);
+    if (llmSettings.baseUrl === binding.baseUrl && llmSettings.model === binding.model) {
+      return;
+    }
+
+    setLlmSettings((current) => {
+      if (current.provider !== DEFAULT_LLM_PROVIDER) {
+        return current;
+      }
+      if (current.baseUrl === binding.baseUrl && current.model === binding.model) {
+        return current;
+      }
+      return {
+        ...current,
+        baseUrl: binding.baseUrl,
+        model: binding.model,
+      };
+    });
+  }, [
+    llmSettings.baseUrl,
+    llmSettings.model,
+    llmSettings.provider,
+    localAiRecommendation,
+    localAiStatus,
+  ]);
 
   useEffect(() => {
     approvalController.start();
@@ -453,17 +600,17 @@ function App() {
           setSetting('allowControlEnabled', !getSettings().allowControlEnabled);
         }),
         listen('tray.toggle_ai_pause', () => {
-          const controller = aiControllerRef.current;
-          if (!controller) {
+          const engine = assistantEngineRef.current;
+          if (!engine) {
             return;
           }
 
-          if (controller.isPaused()) {
-            controller.resume();
+          if (engine.isPaused()) {
+            engine.resume();
           } else {
-            controller.pause();
+            engine.pause();
           }
-          setAiState(controller.getState());
+          setAiState(engine.getState());
         }),
         listen('tray.show', () => {
           setWindowVisible(true);
@@ -638,7 +785,7 @@ function App() {
             return { ...prev, status: 'canceled' };
           });
           // Stop AI if running
-          aiControllerRef.current?.stop('Run canceled');
+          assistantEngineRef.current?.stop('Run canceled');
         },
         onDeviceToken: (nextDeviceToken) => {
           void setStoredDeviceToken(id, nextDeviceToken).catch((err) => {
@@ -686,7 +833,7 @@ function App() {
           console.log('[App] Run started:', runId, 'mode:', mode);
           if (mode === 'ai_assist') {
             // Start AI Assist controller
-            startAiAssist(runId, goal);
+            startAssistantEngine(runId, goal);
           }
           return { ok: true as const };
         },
@@ -709,7 +856,7 @@ function App() {
     return () => {
       disposed = true;
       wsClient?.disconnect();
-      aiControllerRef.current?.stop('Component unmounting');
+      assistantEngineRef.current?.stop('Component unmounting');
     };
   }, []);
 
@@ -806,6 +953,64 @@ function App() {
       cancelled = true;
     };
   }, [authState, runtimeConfig, sessionDeviceToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void getOverlayModeStatus()
+      .then((next) => {
+        if (!cancelled) {
+          setOverlayModeStatus(next);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setOverlayModeStatus({
+            active: false,
+            supported: false,
+            lastError: err instanceof Error ? err.message : 'Overlay mode status unavailable',
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const shouldEnterOverlay = Boolean(aiState?.isRunning);
+
+    if (overlayModeStatus?.supported === false) {
+      return;
+    }
+
+    const syncOverlayMode = async () => {
+      try {
+        const next = shouldEnterOverlay
+          ? await enterOverlayMode()
+          : await exitOverlayMode();
+        if (!cancelled) {
+          setOverlayModeStatus(next);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setOverlayModeStatus((current) => ({
+            active: current?.active ?? false,
+            supported: current?.supported ?? false,
+            lastError: err instanceof Error ? err.message : 'Overlay mode sync failed',
+          }));
+        }
+      }
+    };
+
+    void syncOverlayMode();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [aiState?.isRunning, overlayModeStatus?.supported]);
 
   useEffect(() => {
     if (!activeRun) {
@@ -910,20 +1115,30 @@ function App() {
     }
   }, [aiState?.status]);
 
-  // Start AI Assist mode
-  const startAiAssist = async (runId: string, goal: string) => {
+  // Start the unified assistant engine for the current run
+  const startAssistantEngine = async (runId: string, goal: string) => {
     if (!client) return;
 
-    const hasKey = await hasLlMProviderConfigured(llmSettings.provider);
+    const effectiveSettings: LlmSettings = llmSettings.provider === DEFAULT_LLM_PROVIDER
+      ? (() => {
+          const binding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, goal);
+          return {
+            ...llmSettings,
+            baseUrl: binding.baseUrl,
+            model: binding.model,
+          };
+        })()
+      : llmSettings;
+    const providerReady = await hasLlMProviderConfigured(effectiveSettings.provider);
 
-    if (!hasKey) {
-      client.sendRunLog(runId, 'AI Assist cannot start: LLM API key not configured', 'error');
+    if (!providerReady) {
+      client.sendRunLog(runId, 'Assistant engine cannot start: provider is not configured', 'error');
       client.sendRunUpdate(runId, 'failed', 'LLM_NOT_CONFIGURED');
       setSettingsOpen(true);
       return;
     }
 
-    const controller = new AiAssistController({
+    const engine = createAssistantEngine(assistantEngineId, {
       wsClient: client,
       deviceId,
       runId,
@@ -951,15 +1166,16 @@ function App() {
         });
       },
       onError: (error) => {
-        console.error('[App] AI Assist error:', error);
+        console.error('[App] Assistant engine error:', error);
+        setMessages((prev) => [...prev, createChatItem('agent', error)]);
       },
     });
 
-    setAiController(controller);
-    const started = await controller.start(llmSettings);
+    setAssistantEngine(engine);
+    const started = await engine.start(effectiveSettings);
     
     if (!started) {
-      setAiController(null);
+      setAssistantEngine(null);
     }
   };
 
@@ -971,12 +1187,7 @@ function App() {
         const msg = payload.message;
         setMessages((prev) => [
           ...prev,
-          {
-            id: `${Date.now()}-${Math.random()}`,
-            role: msg.role,
-            text: msg.text,
-            timestamp: msg.createdAt,
-          },
+          createChatItem(msg.role, msg.text, msg.createdAt),
         ]);
         break;
       }
@@ -994,24 +1205,174 @@ function App() {
   // Handle sending a chat message
   const handleSendMessage = useCallback(
     (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) {
+        return;
+      }
+
       setMessages((prev) => [
         ...prev,
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          role: 'user',
-          text,
-          timestamp: Date.now(),
-        },
+        createChatItem('user', trimmed),
       ]);
-      client?.sendChat(text, activeRun?.runId);
-      
-      // If AI is asking for user input, send response
-      if (aiController && aiState?.status === 'asking_user') {
-        aiController.userResponse(text);
+
+      if (!client || !runtimeConfig || !sessionDeviceToken) {
+        setMessages((prev) => [
+          ...prev,
+          createChatItem('agent', 'Sign in and reconnect this desktop before asking the assistant to work.'),
+        ]);
+        return;
       }
+
+      const assistantReadiness = evaluateDesktopTaskReadiness({
+        mode: 'ai_assist',
+        subscriptionStatus: desktopBootstrap?.billing.subscriptionStatus ?? 'inactive',
+        permissionStatus,
+        localSettings,
+        workspaceConfigured: workspaceState.configured,
+        providerConfigured,
+      });
+
+      if (!assistantReadiness.ready) {
+        const setupMessage = llmSettings.provider === DEFAULT_LLM_PROVIDER && !providerConfigured
+          ? localAiInstallProgress?.message
+              || localAiRecommendation?.reason
+              || 'Set up Free AI first so the local assistant can prepare this desktop.'
+          : assistantReadiness.blockers[0]?.detail || 'This desktop is not ready to start assistant work yet.';
+        setMessages((prev) => [
+          ...prev,
+          createChatItem(
+            'agent',
+            setupMessage
+          ),
+        ]);
+        return;
+      }
+
+      const localPlanPolicy = getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing);
+      const startingNewTask = !activeRun || !['queued', 'running', 'waiting_for_user'].includes(activeRun.status);
+
+      if (llmSettings.provider === DEFAULT_LLM_PROVIDER) {
+        const localTaskBinding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, trimmed);
+        if (localTaskBinding.requiresVisionBoost) {
+          setVisionBoostRequested(true);
+          setMessages((prev) => [
+            ...prev,
+            createChatItem(
+              'agent',
+              `This task likely needs screenshot understanding. Enable Vision Boost to let the local assistant inspect the screen with ${localTaskBinding.visionModel}.`
+            ),
+          ]);
+          return;
+        }
+
+        if (startingNewTask) {
+          const usage = readLocalAiTaskUsage(window.localStorage);
+          const taskAllowance = canStartManagedLocalTask(localPlanPolicy, usage);
+          if (!taskAllowance.allowed) {
+            setMessages((prev) => [
+              ...prev,
+              createChatItem('agent', taskAllowance.reason || 'Free local task limit reached for today.'),
+            ]);
+            return;
+          }
+        }
+      }
+
+      void (async () => {
+        try {
+          const run = await ensureAssistantRunForMessage({
+            message: trimmed,
+            activeRun,
+            runtimeConfig,
+            deviceToken: sessionDeviceToken,
+          });
+
+          setActiveRun(run);
+          setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, run));
+          if (llmSettings.provider === DEFAULT_LLM_PROVIDER && startingNewTask) {
+            setLocalAiTaskUsage(recordManagedLocalTaskStart(window.localStorage));
+          }
+
+          const sent = client.sendChat(trimmed, run.runId);
+          if (!sent) {
+            setMessages((prev) => [
+              ...prev,
+              createChatItem('agent', 'The desktop disconnected before the assistant could start. Reconnect and try again.'),
+            ]);
+            return;
+          }
+
+          if (assistantEngine && aiState?.status === 'asking_user') {
+            assistantEngine.userResponse(trimmed);
+          }
+        } catch (err) {
+          setMessages((prev) => [
+            ...prev,
+            createChatItem(
+              'agent',
+              err instanceof Error ? err.message : 'The assistant could not start the task from chat.'
+            ),
+          ]);
+        }
+      })();
     },
-    [client, activeRun, aiController, aiState]
+    [
+      activeRun,
+      assistantEngine,
+      aiState,
+      client,
+      desktopBootstrap?.billing.subscriptionStatus,
+      desktopBootstrap?.billing,
+      desktopAccount?.billing,
+      localSettings,
+      permissionStatus,
+      providerConfigured,
+      runtimeConfig,
+      sessionDeviceToken,
+      workspaceState.configured,
+      llmSettings.provider,
+      localAiStatus,
+      localAiInstallProgress?.message,
+      localAiRecommendation?.reason,
+      localAiRecommendation,
+    ]
   );
+
+  const handleStartFreeAi = useCallback(async (tier: LocalAiTier) => {
+    setLocalAiActionBusy(true);
+    setLocalAiError(null);
+    try {
+      const progress = await startLocalAiInstall(tier);
+      setLocalAiInstallProgress(progress);
+      await refreshLocalAiState();
+      setLlmSettings((current) => mergeLlmSettings(current.provider === DEFAULT_LLM_PROVIDER ? current : getLlmDefaults(DEFAULT_LLM_PROVIDER)));
+      setDiagnosticsStatus('Free AI setup started for this desktop.');
+    } catch (err) {
+      setLocalAiError(err instanceof Error ? err.message : 'Failed to start Free AI setup');
+    } finally {
+      setLocalAiActionBusy(false);
+    }
+  }, [refreshLocalAiState]);
+
+  const handleEnableVisionBoost = useCallback(async () => {
+    setLocalAiActionBusy(true);
+    setLocalAiError(null);
+    try {
+      const localPlanPolicy = getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing);
+      if (!localPlanPolicy.visionBoostIncluded) {
+        throw new Error('Vision Boost is included with Plus. Free local AI stays on lightweight text models.');
+      }
+      const progress = await enableLocalAiVisionBoost();
+      setLocalAiInstallProgress(progress);
+      await refreshLocalAiState();
+      setVisionBoostRequested(false);
+      setDiagnosticsStatus('Vision Boost setup started for this desktop.');
+    } catch (err) {
+      setLocalAiError(err instanceof Error ? err.message : 'Failed to enable Vision Boost');
+    } finally {
+      setLocalAiActionBusy(false);
+    }
+  }, [desktopBootstrap?.billing, desktopAccount?.billing, refreshLocalAiState]);
 
   const handleDesktopSignIn = useCallback(async () => {
     if (!runtimeConfig) {
@@ -1084,8 +1445,6 @@ function App() {
     setDesktopAccount(null);
     setDesktopAccountError(null);
     setDeviceRevokeBusyId(null);
-    setTaskCreateError(null);
-    setTaskGoal('');
     setRecentRuns([]);
     setActiveRun(null);
     setPendingApproval(null);
@@ -1096,83 +1455,12 @@ function App() {
     approvalController.cancelAllPending('Desktop signed out');
     controlApprovalPayloadsRef.current.clear();
     proposalApprovalPayloadsRef.current.clear();
-    aiControllerRef.current?.stop('Desktop signed out');
-    setAiController(null);
+    assistantEngineRef.current?.stop('Desktop signed out');
+    setAssistantEngine(null);
     setAiState(null);
+    setVisionBoostRequested(false);
     setAuthError(revokeError);
   }, [client, deviceId, runtimeConfig, sessionDeviceToken]);
-
-  const handleTaskModeChange = useCallback((nextMode: RunMode) => {
-    setTaskMode(nextMode);
-  }, []);
-
-  const handleLlmProviderChange = useCallback((provider: LlmSettings['provider']) => {
-    setLlmSettings((current) => mergeLlmSettings({
-      ...current,
-      provider,
-    }));
-  }, []);
-
-  const handleLlmModelChange = useCallback((model: string) => {
-    setLlmSettings((current) => ({
-      ...current,
-      model,
-    }));
-  }, []);
-
-  const handleCreateTask = useCallback(async () => {
-    if (!runtimeConfig || !sessionDeviceToken) {
-      setTaskCreateError('Desktop sign-in is required before starting a task.');
-      return;
-    }
-
-    const nextReadiness = evaluateDesktopTaskReadiness({
-      mode: taskMode,
-      subscriptionStatus: desktopBootstrap?.billing.subscriptionStatus ?? 'inactive',
-      permissionStatus,
-      localSettings,
-      workspaceConfigured: workspaceState.configured,
-      providerConfigured,
-    });
-
-    if (!taskGoal.trim()) {
-      setTaskCreateError('Enter a task goal before starting.');
-      return;
-    }
-
-    if (!nextReadiness.ready) {
-      setTaskCreateError(nextReadiness.blockers[0]?.detail || 'Desktop is not ready to start a task.');
-      return;
-    }
-
-    setTaskCreateBusy(true);
-    setTaskCreateError(null);
-
-    try {
-      const run = await createDesktopRun(runtimeConfig, sessionDeviceToken, {
-        goal: taskGoal.trim(),
-        mode: taskMode,
-      });
-
-      setTaskGoal('');
-      setActiveRun(run);
-      setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, run));
-    } catch (err) {
-      setTaskCreateError(err instanceof Error ? err.message : 'Failed to start task');
-    } finally {
-      setTaskCreateBusy(false);
-    }
-  }, [
-    desktopBootstrap?.billing.subscriptionStatus,
-    localSettings,
-    permissionStatus,
-    providerConfigured,
-    runtimeConfig,
-    sessionDeviceToken,
-    taskGoal,
-    taskMode,
-    workspaceState.configured,
-  ]);
 
   const handleSelectRecentRun = useCallback((runId: string) => {
     const selected = recentRuns.find((run) => run.runId === runId);
@@ -1211,9 +1499,9 @@ function App() {
   // Handle cancel run
   const handleCancelRun = useCallback(() => {
     if (!activeRun) return;
-    aiController?.stop('User canceled');
+    assistantEngine?.stop('User canceled');
     client?.sendRunCancel(activeRun.runId);
-  }, [client, activeRun, aiController]);
+  }, [client, activeRun, assistantEngine]);
 
   // Handle action approval
   const handleActionApprove = useCallback(async () => {
@@ -1270,7 +1558,7 @@ function App() {
   const handleScreenPreviewToggle = useCallback((enabled: boolean) => {
     setSetting('screenPreviewEnabled', enabled);
     if (!enabled) {
-      aiControllerRef.current?.pause();
+      assistantEngineRef.current?.pause();
     }
   }, []);
 
@@ -1300,13 +1588,13 @@ function App() {
   // Handle AI Assist action approval
   const handleAiApproveAction = useCallback(async () => {
     const approval = getNextPendingApproval(approvalItems, 'ai_proposal');
-    if (!approval || !aiControllerRef.current) {
+    if (!approval || !assistantEngineRef.current) {
       return;
     }
 
     approvalController.approve(approval.id);
     approvalController.markExecuting(approval.id);
-    const result = await aiControllerRef.current.approveAction();
+    const result = await assistantEngineRef.current.approveAction();
     if (result.ok) {
       approvalController.markExecuted(approval.id);
       return;
@@ -1337,13 +1625,13 @@ function App() {
       return;
     }
 
-    if (!aiControllerRef.current) {
+    if (!assistantEngineRef.current) {
       return;
     }
 
     approvalController.approve(approval.id);
     approvalController.markExecuting(approval.id);
-    const result = await aiControllerRef.current.approveTool();
+    const result = await assistantEngineRef.current.approveTool();
     if (result.ok) {
       approvalController.markExecuted(approval.id);
       return;
@@ -1361,22 +1649,29 @@ function App() {
   }, [approvalItems]);
 
   const handleAiUserResponse = useCallback((response: string) => {
-    aiController?.userResponse(response);
-  }, [aiController]);
+    assistantEngine?.userResponse(response);
+  }, [assistantEngine]);
 
   const handleStopAi = useCallback(() => {
     approvalController.cancelAllPending('AI Assist stopped', (item) =>
       item.kind === 'ai_proposal' || item.kind === 'tool_call'
     );
-    aiController?.stop('User stopped');
+    assistantEngine?.stop('User stopped');
     if (activeRun) {
       client?.sendRunUpdate(activeRun.runId, 'canceled', 'AI Assist stopped by user');
       setActiveRun((prev) => (prev ? { ...prev, status: 'canceled' } : prev));
     }
-    setAiController(null);
+    setAssistantEngine(null);
     setAiState(null);
     setCurrentProposal(undefined);
-  }, [aiController, activeRun, client]);
+    void exitOverlayMode()
+      .then((next) => {
+        setOverlayModeStatus(next);
+      })
+      .catch((err) => {
+        console.error('[App] Failed to exit overlay mode after stop:', err);
+      });
+  }, [assistantEngine, activeRun, client]);
 
   const handleStopAll = useCallback(() => {
     const confirmed = window.confirm(
@@ -1386,13 +1681,20 @@ function App() {
       return;
     }
 
-    aiControllerRef.current?.pause();
+    assistantEngineRef.current?.pause();
     approvalController.cancelAllPending('Stop all requested');
     updateSettings({
       allowControlEnabled: false,
       screenPreviewEnabled: false,
     });
     setInputPermissionError(null);
+    void exitOverlayMode()
+      .then((next) => {
+        setOverlayModeStatus(next);
+      })
+      .catch((err) => {
+        console.error('[App] Failed to exit overlay mode after Stop All:', err);
+      });
   }, []);
 
   const handleWorkspaceChange = useCallback((state: LocalWorkspaceState) => {
@@ -1414,23 +1716,100 @@ function App() {
   const pendingApprovals = approvalItems
     .filter((item) => item.state === 'pending')
     .sort((left, right) => left.createdAt - right.createdAt);
+  const isOverlayActive = Boolean(overlayModeStatus?.active && aiState?.isRunning);
   const subscriptionStatus = desktopBootstrap?.billing.subscriptionStatus ?? 'inactive';
+  const localPlanPolicy = getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing);
+  const localTaskAllowance = canStartManagedLocalTask(localPlanPolicy, localAiTaskUsage);
   const siblingDevices = desktopAccount?.devices.filter((device) => device.deviceId !== desktopAccount.currentDevice?.deviceId) ?? [];
-  const taskReadiness = evaluateDesktopTaskReadiness({
-    mode: taskMode,
+  const assistantReadiness = evaluateDesktopTaskReadiness({
+    mode: 'ai_assist',
     subscriptionStatus,
     permissionStatus,
     localSettings,
     workspaceConfigured: workspaceState.configured,
     providerConfigured,
   });
+  const taskReadiness = evaluateDesktopTaskReadiness({
+    mode: 'ai_assist',
+    subscriptionStatus,
+    permissionStatus,
+    localSettings,
+    workspaceConfigured: workspaceState.configured,
+    providerConfigured,
+  });
+  const showFreeAiSetup =
+    isSignedIn
+    && llmSettings.provider === DEFAULT_LLM_PROVIDER
+    && !providerConfigured;
+  const showVisionBoostSetup =
+    isSignedIn
+    && llmSettings.provider === DEFAULT_LLM_PROVIDER
+    && (visionBoostRequested || Boolean(localAiRecommendation?.visionAvailable || localAiStatus?.selectedTier === 'vision'));
+  const assistantSetupMessage = showFreeAiSetup
+    ? localAiInstallProgress?.message
+        || localAiRecommendation?.reason
+        || 'Set up Free AI to prepare the local assistant for this desktop.'
+    : assistantReadiness.blockers[0]?.detail || 'Open settings or permission prompts to finish setup.';
+  const overlayStatusLabel = aiState?.status === 'paused'
+    ? 'GORKH is paused.'
+    : aiState?.status === 'awaiting_approval'
+      ? 'Waiting for your approval.'
+      : aiState?.status === 'asking_user'
+        ? 'Waiting for your response.'
+        : aiState?.status === 'executing'
+          ? 'GORKH is working…'
+          : 'GORKH is thinking…';
+  const userMessages = messages.filter((item) => item.role === 'user');
+  const overlayGoal = activeRun?.goal ?? userMessages[userMessages.length - 1]?.text ?? null;
+  const overlayPreviewMessages = messages.slice(-4);
+  const overlayWorkspaceLabel = workspaceState.configured ? workspaceState.rootName || 'Configured' : 'Not configured';
+  const handleToggleAiPause = useCallback(() => {
+    const engine = assistantEngineRef.current;
+    if (!engine) {
+      return;
+    }
+
+    if (engine.isPaused()) {
+      engine.resume();
+    } else {
+      engine.pause();
+    }
+
+    setAiState(engine.getState());
+  }, []);
+
+  useEffect(() => {
+    if (!isOverlayActive && overlayDetailsOpen) {
+      setOverlayDetailsOpen(false);
+    }
+  }, [isOverlayActive, overlayDetailsOpen]);
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: '#f5f5f5', display: 'flex' }}>
+    <div
+      style={{
+        width: '100vw',
+        height: '100vh',
+        background: isOverlayActive ? '#020305' : '#f5f5f5',
+        display: 'flex',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
       {/* Main Content */}
-      <div style={{ flex: 1, padding: '1.5rem', overflow: 'auto' }}>
+      <div
+        style={{
+          flex: 1,
+          padding: '1.5rem',
+          overflow: 'auto',
+          opacity: isOverlayActive ? 0 : 1,
+          pointerEvents: isOverlayActive ? 'none' : 'auto',
+          filter: isOverlayActive ? 'blur(18px)' : 'none',
+          transform: isOverlayActive ? 'scale(1.015)' : 'scale(1)',
+          transition: 'opacity 220ms ease, filter 220ms ease, transform 220ms ease',
+        }}
+      >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h1>AI Operator Desktop</h1>
+          <BrandWordmark width={220} subtitle="Desktop intelligence layer" />
           <div style={{ display: 'flex', gap: '0.75rem' }}>
             <button
               onClick={handleStopAll}
@@ -1448,41 +1827,6 @@ function App() {
             >
               Stop All
             </button>
-            {isSignedIn && (
-              <AgentTaskDialog
-                trigger={
-                  <button
-                    style={{
-                      padding: '0.5rem 1rem',
-                      background: '#f3e8ff',
-                      border: '1px solid #a855f7',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      fontSize: '0.875rem',
-                      color: '#6b21a8',
-                    }}
-                  >
-                    ✨ Advanced Agent
-                  </button>
-                }
-              />
-            )}
-            {isSignedIn && (
-              <button
-                onClick={() => setAgentWorkflowOpen(true)}
-                style={{
-                  padding: '0.5rem 1rem',
-                  background: '#dbeafe',
-                  border: '1px solid #3b82f6',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  fontSize: '0.875rem',
-                  color: '#1e40af',
-                }}
-              >
-                🚀 AI Engineer
-              </button>
-            )}
             <button
               onClick={() => setSettingsOpen(true)}
               style={{
@@ -1498,8 +1842,6 @@ function App() {
             </button>
           </div>
         </div>
-        <p>Device ID: <code>{deviceId}</code></p>
-
         {runtimeConfigError && (
           <div
             style={{
@@ -1655,506 +1997,549 @@ function App() {
 
         {isSignedIn && (
           <>
-            <div
+            <section
               style={{
                 marginTop: '1.5rem',
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-                gap: '1rem',
+                padding: '1rem',
+                background: 'white',
+                borderRadius: '12px',
+                border: '1px solid #e5e7eb',
               }}
             >
-              <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-                  <div>
-                    <h2 style={{ margin: 0, fontSize: '1rem' }}>Create Task</h2>
-                    <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-                      Start a run directly from this desktop without using the dashboard.
-                    </p>
-                  </div>
-                  {desktopBootstrap?.user.email && (
-                    <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
-                      {desktopBootstrap.user.email}
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <div>
+                  <h2 style={{ margin: 0, fontSize: '1.125rem' }}>Assistant</h2>
+                  <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem', maxWidth: '52ch' }}>
+                    Ask naturally and the desktop will create or resume work under the hood without making you manage runs manually.
+                  </p>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      padding: '0.35rem 0.75rem',
+                      borderRadius: '9999px',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      background: assistantReadiness.ready ? '#dcfce7' : '#fff7ed',
+                      color: assistantReadiness.ready ? '#166534' : '#9a3412',
+                    }}
+                  >
+                    {assistantReadiness.ready ? 'Ready to work' : 'Setup needed'}
+                  </span>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      padding: '0.35rem 0.75rem',
+                      borderRadius: '9999px',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      background: '#eff6ff',
+                      color: '#1d4ed8',
+                    }}
+                  >
+                    Provider: {getLlmProviderLabel(llmSettings.provider)}
+                  </span>
+                  <span
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      padding: '0.35rem 0.75rem',
+                      borderRadius: '9999px',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      background: localPlanPolicy.plan === 'plus' ? '#ede9fe' : '#fef3c7',
+                      color: localPlanPolicy.plan === 'plus' ? '#6d28d9' : '#92400e',
+                    }}
+                  >
+                    {localPlanPolicy.plan === 'plus' ? 'Plus plan' : 'Free plan'}
+                  </span>
+                  {activeRun && (
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        padding: '0.35rem 0.75rem',
+                        borderRadius: '9999px',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        background: '#f3f4f6',
+                        color: '#334155',
+                      }}
+                    >
+                      Current task: {activeRun.status}
                     </span>
                   )}
                 </div>
+              </div>
 
-                <label style={{ display: 'block', marginTop: '1rem', fontSize: '0.875rem', fontWeight: 600 }}>
-                  Task goal
-                </label>
-                <textarea
-                  value={taskGoal}
-                  onChange={(event) => setTaskGoal(event.target.value)}
-                  placeholder="Example: Inspect the deployment failure, find the root cause, and prepare the fix."
+              {!assistantReadiness.ready && (
+                <div
                   style={{
-                    width: '100%',
-                    minHeight: '96px',
-                    marginTop: '0.5rem',
-                    padding: '0.75rem',
-                    borderRadius: '6px',
-                    border: '1px solid #d1d5db',
-                    fontSize: '0.875rem',
-                    resize: 'vertical',
-                    boxSizing: 'border-box',
+                    marginTop: '1rem',
+                    padding: '0.9rem 1rem',
+                    background: '#fff7ed',
+                    border: '1px solid #fdba74',
+                    borderRadius: '10px',
+                    color: '#9a3412',
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }}>The assistant needs setup before it can act.</div>
+                  <div style={{ marginTop: '0.35rem', fontSize: '0.875rem' }}>
+                    {assistantSetupMessage}
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
+                    {showFreeAiSetup && (
+                      <button
+                        onClick={() => {
+                          void handleStartFreeAi(localAiRecommendation?.tier ?? 'light');
+                        }}
+                        disabled={localAiActionBusy}
+                        style={{ padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: localAiActionBusy ? 'not-allowed' : 'pointer' }}
+                      >
+                        {localAiActionBusy ? 'Preparing Free AI...' : 'Start Free AI'}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setSettingsOpen(true)}
+                      style={{ padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                    >
+                      Open Settings
+                    </button>
+                    {(assistantReadiness.blockers.some((blocker) => blocker.id === 'screen-permission') ||
+                      assistantReadiness.blockers.some((blocker) => blocker.id === 'accessibility-permission')) && (
+                      <button
+                        onClick={() =>
+                          void handleOpenPermissionSettings(
+                            assistantReadiness.blockers.some((blocker) => blocker.id === 'screen-permission')
+                              ? 'screenRecording'
+                              : 'accessibility'
+                          )
+                        }
+                        style={{ padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                      >
+                        Open Permission Settings
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {(showFreeAiSetup || showVisionBoostSetup) && (
+                <FreeAiSetupCard
+                  status={localAiStatus}
+                  installProgress={localAiInstallProgress}
+                  recommendation={localAiRecommendation}
+                  hardwareProfile={localAiHardwareProfile}
+                  busy={localAiBusy}
+                  actionBusy={localAiActionBusy}
+                  error={localAiError}
+                  showVisionBoost={showVisionBoostSetup}
+                  onStart={(tier) => {
+                    void handleStartFreeAi(tier);
+                  }}
+                  onEnableVisionBoost={() => {
+                    void handleEnableVisionBoost();
+                  }}
+                  onRefresh={() => {
+                    void refreshLocalAiState();
                   }}
                 />
+              )}
 
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', marginTop: '1rem' }}>
-                  <label style={{ display: 'block', fontSize: '0.875rem' }}>
-                    <span style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 600 }}>Mode</span>
+              <div style={{ marginTop: '1rem' }}>
+                <div
+                  style={{
+                    marginBottom: '0.75rem',
+                    padding: '0.75rem',
+                    background: localPlanPolicy.plan === 'plus' ? '#f5f3ff' : '#fffbeb',
+                    border: `1px solid ${localPlanPolicy.plan === 'plus' ? '#c4b5fd' : '#fde68a'}`,
+                    borderRadius: '8px',
+                    color: localPlanPolicy.plan === 'plus' ? '#5b21b6' : '#92400e',
+                    fontSize: '0.875rem',
+                  }}
+                >
+                  {localPlanPolicy.plan === 'plus'
+                    ? 'Plus plan: unlimited local tasks and Vision Boost are enabled on this desktop.'
+                    : `Free plan: ${localAiTaskUsage.tasksStarted}/${localPlanPolicy.localTaskLimit ?? 0} local tasks used today. Vision Boost is reserved for Plus.`}
+                  {localTaskAllowance.remaining != null && (
+                    <div style={{ marginTop: '0.35rem' }}>
+                      {localTaskAllowance.remaining} free local task{localTaskAllowance.remaining === 1 ? '' : 's'} remaining today.
+                    </div>
+                  )}
+                </div>
+                <ChatOverlay
+                  messages={messages}
+                  status={status}
+                  onSendMessage={handleSendMessage}
+                />
+              </div>
+            </section>
+
+            <details
+              style={{
+                marginTop: '1rem',
+                padding: '1rem',
+                background: 'white',
+                borderRadius: '10px',
+                border: '1px solid #e5e7eb',
+              }}
+            >
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#1f2937' }}>Settings & details</summary>
+              <div style={{ marginTop: '1rem' }}>
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
+                  <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>
+                    Device ID: <code>{deviceId}</code>
+                  </span>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.875rem', color: '#4b5563' }}>
+                    <span>Assistant engine</span>
                     <select
-                      value={taskMode}
-                      onChange={(event) => handleTaskModeChange(event.target.value as RunMode)}
-                      style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', border: '1px solid #d1d5db' }}
+                      value={assistantEngineId}
+                      onChange={(event) => setAssistantEngineId(event.target.value as AssistantEngineId)}
+                      style={{ padding: '0.4rem 0.55rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white' }}
                     >
-                      <option value="ai_assist">AI Assist</option>
-                      <option value="manual">Manual</option>
+                      {assistantEngineCatalog.map((engine) => (
+                        <option key={engine.id} value={engine.id}>
+                          {engine.label}
+                        </option>
+                      ))}
                     </select>
                   </label>
-
-                  <label style={{ display: 'block', fontSize: '0.875rem' }}>
-                    <span style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 600 }}>Provider</span>
-                    <select
-                      value={llmSettings.provider}
-                      onChange={(event) => handleLlmProviderChange(event.target.value as LlmSettings['provider'])}
-                      disabled={taskMode !== 'ai_assist'}
-                      style={{
-                        width: '100%',
-                        padding: '0.6rem',
-                        borderRadius: '6px',
-                        border: '1px solid #d1d5db',
-                        background: taskMode === 'ai_assist' ? 'white' : '#f3f4f6',
-                      }}
-                    >
-                      <option value="openai">OpenAI</option>
-                      <option value="openai_compat">OpenAI-compatible local</option>
-                    </select>
-                  </label>
-
-                  <label style={{ display: 'block', fontSize: '0.875rem' }}>
-                    <span style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 600 }}>Model</span>
-                    <input
-                      value={llmSettings.model}
-                      onChange={(event) => handleLlmModelChange(event.target.value)}
-                      disabled={taskMode !== 'ai_assist'}
-                      style={{
-                        width: '100%',
-                        padding: '0.6rem',
-                        borderRadius: '6px',
-                        border: '1px solid #d1d5db',
-                        background: taskMode === 'ai_assist' ? 'white' : '#f3f4f6',
-                        boxSizing: 'border-box',
-                      }}
-                    />
-                  </label>
-                </div>
-
-                <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                  {taskMode === 'ai_assist'
-                    ? providerCheckBusy
-                      ? 'Checking provider configuration...'
-                      : providerConfigured
-                        ? 'Provider configured for AI Assist.'
-                        : 'Provider setup still required for AI Assist.'
-                    : 'Manual mode ignores provider and workspace blockers.'}
-                </div>
-
-                {taskCreateError && (
-                  <div
-                    style={{
-                      marginTop: '0.75rem',
-                      padding: '0.75rem',
-                      background: '#fef2f2',
-                      border: '1px solid #fecaca',
-                      borderRadius: '6px',
-                      fontSize: '0.875rem',
-                      color: '#991b1b',
-                    }}
-                  >
-                    {taskCreateError}
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-                  <button
-                    onClick={() => {
-                      void handleCreateTask();
-                    }}
-                    disabled={taskCreateBusy || desktopBootstrapBusy || !taskGoal.trim() || !taskReadiness.ready}
-                    style={{
-                      padding: '0.75rem 1rem',
-                      background: taskCreateBusy || desktopBootstrapBusy || !taskGoal.trim() || !taskReadiness.ready ? '#9ca3af' : '#111827',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: taskCreateBusy || desktopBootstrapBusy || !taskGoal.trim() || !taskReadiness.ready ? 'not-allowed' : 'pointer',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {taskCreateBusy ? 'Starting...' : 'Start Task'}
-                  </button>
                   <button
                     onClick={() => setSettingsOpen(true)}
                     style={{
-                      padding: '0.75rem 1rem',
+                      padding: '0.5rem 1rem',
                       background: 'white',
-                      color: '#111827',
                       border: '1px solid #d1d5db',
                       borderRadius: '6px',
                       cursor: 'pointer',
+                      fontSize: '0.875rem',
+                      color: '#111827',
                     }}
                   >
                     Open Settings
                   </button>
                 </div>
-              </section>
-
-              <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-                <h2 style={{ margin: 0, fontSize: '1rem' }}>Readiness</h2>
-                <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-                  Subscription, permissions, workspace, and provider state for this desktop.
+                <p style={{ margin: '0 0 1rem', fontSize: '0.8125rem', color: '#6b7280', maxWidth: '72ch' }}>
+                  The assistant chat is the primary product surface. This area keeps setup, devices, screen tools, and debug fallback controls out of the way unless you need them.
                 </p>
 
-                {desktopBootstrapBusy && (
-                  <p style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#6b7280' }}>
-                    Loading account and task state...
-                  </p>
-                )}
-
-                {desktopBootstrapError && (
-                  <div
-                    style={{
-                      marginTop: '0.75rem',
-                      padding: '0.75rem',
-                      background: '#fef2f2',
-                      border: '1px solid #fecaca',
-                      borderRadius: '6px',
-                      fontSize: '0.875rem',
-                      color: '#991b1b',
-                    }}
-                  >
-                    {desktopBootstrapError}
-                  </div>
-                )}
-
-                <div style={{ marginTop: '1rem', display: 'grid', gap: '0.5rem' }}>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Subscription:</strong> {subscriptionStatus === 'active' ? 'Active' : 'Inactive'}
-                  </div>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Screen Preview:</strong> {localSettings.screenPreviewEnabled ? 'Enabled' : 'Disabled'}
-                  </div>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Screen Recording Permission:</strong> {permissionStatus.screenRecording}
-                  </div>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Allow Control:</strong> {localSettings.allowControlEnabled ? 'Enabled' : 'Disabled'}
-                  </div>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Accessibility Permission:</strong> {permissionStatus.accessibility}
-                  </div>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Workspace:</strong> {workspaceState.configured ? workspaceState.rootName || 'Configured' : 'Not configured'}
-                  </div>
-                  <div style={{ fontSize: '0.875rem' }}>
-                    <strong>Provider:</strong> {providerCheckBusy ? 'Checking...' : providerConfigured ? 'Configured' : 'Not configured'}
-                  </div>
-                </div>
-
                 <div
                   style={{
-                    marginTop: '1rem',
-                    padding: '0.75rem',
-                    background: taskReadiness.ready ? '#ecfdf5' : '#fff7ed',
-                    border: `1px solid ${taskReadiness.ready ? '#86efac' : '#fdba74'}`,
-                    borderRadius: '6px',
-                    fontSize: '0.875rem',
-                    color: taskReadiness.ready ? '#166534' : '#9a3412',
-                  }}
-                >
-                  {taskReadiness.ready
-                    ? 'This desktop is ready to start tasks directly.'
-                    : `Task start is blocked by ${taskReadiness.blockers.length} readiness item${taskReadiness.blockers.length === 1 ? '' : 's'}.`}
-                </div>
-
-                {taskReadiness.blockers.length > 0 && (
-                  <div style={{ marginTop: '0.75rem', display: 'grid', gap: '0.5rem' }}>
-                    {taskReadiness.blockers.map((blocker) => (
-                      <div
-                        key={blocker.id}
-                        style={{
-                          padding: '0.75rem',
-                          background: '#f9fafb',
-                          borderRadius: '6px',
-                          border: '1px solid #e5e7eb',
-                        }}
-                      >
-                        <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{blocker.label}</div>
-                        <div style={{ marginTop: '0.25rem', fontSize: '0.8125rem', color: '#6b7280' }}>{blocker.detail}</div>
-                        <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-                          {blocker.id === 'screen-preview' && (
-                            <button
-                              onClick={() => handleScreenPreviewToggle(true)}
-                              style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
-                            >
-                              Enable Screen Preview
-                            </button>
-                          )}
-                          {blocker.id === 'control-toggle' && (
-                            <button
-                              onClick={() => handleControlToggle(true)}
-                              style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
-                            >
-                              Enable Allow Control
-                            </button>
-                          )}
-                          {(blocker.id === 'screen-permission' || blocker.id === 'accessibility-permission') && (
-                            <button
-                              onClick={() => void handleOpenPermissionSettings(blocker.id === 'screen-permission' ? 'screenRecording' : 'accessibility')}
-                              style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
-                            >
-                              Open Permission Settings
-                            </button>
-                          )}
-                          {(blocker.id === 'workspace' || blocker.id === 'provider') && (
-                            <button
-                              onClick={() => setSettingsOpen(true)}
-                              style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
-                            >
-                              Open Settings
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            </div>
-
-            <section
-              style={{
-                marginTop: '1rem',
-                padding: '1rem',
-                background: 'white',
-                borderRadius: '8px',
-                border: '1px solid #e5e7eb',
-              }}
-            >
-              <h2 style={{ margin: 0, fontSize: '1rem' }}>Account & Devices</h2>
-              <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-                Manage the signed-in desktop session and any other desktops on this account.
-              </p>
-
-              {desktopAccountBusy && (
-                <p style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#6b7280' }}>
-                  Loading device sessions...
-                </p>
-              )}
-
-              {desktopAccountError && (
-                <div
-                  style={{
-                    marginTop: '0.75rem',
-                    padding: '0.75rem',
-                    background: '#fef2f2',
-                    border: '1px solid #fecaca',
-                    borderRadius: '6px',
-                    fontSize: '0.875rem',
-                    color: '#991b1b',
-                  }}
-                >
-                  {desktopAccountError}
-                </div>
-              )}
-
-              {desktopAccount && (
-                <div
-                  style={{
-                    marginTop: '1rem',
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
                     gap: '1rem',
                   }}
                 >
-                  <div
-                    style={{
-                      padding: '0.75rem',
-                      background: '#f9fafb',
-                      borderRadius: '6px',
-                      border: '1px solid #e5e7eb',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>Current desktop</div>
-                    <div style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
-                      {desktopAccount.currentDevice?.deviceName || `Desktop-${deviceId.slice(0, 8)}`}
-                    </div>
-                    <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                      {desktopAccount.user.email} • {desktopAccount.billing.subscriptionStatus === 'active' ? 'Subscription active' : 'Subscription inactive'}
-                    </div>
-                    {desktopAccount.currentDevice && (
-                      <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                        {desktopAccount.currentDevice.platform} • {desktopAccount.currentDevice.connected ? 'Connected' : 'Offline'}
+                  <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+                    <h2 style={{ margin: 0, fontSize: '1rem' }}>Setup status</h2>
+                    <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+                      Subscription, permissions, workspace, and provider state for this desktop.
+                    </p>
+
+                    {desktopBootstrapBusy && (
+                      <p style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#6b7280' }}>
+                        Loading account and task state...
+                      </p>
+                    )}
+
+                    {desktopBootstrapError && (
+                      <div
+                        style={{
+                          marginTop: '0.75rem',
+                          padding: '0.75rem',
+                          background: '#fef2f2',
+                          border: '1px solid #fecaca',
+                          borderRadius: '6px',
+                          fontSize: '0.875rem',
+                          color: '#991b1b',
+                        }}
+                      >
+                        {desktopBootstrapError}
                       </div>
                     )}
-                  </div>
 
-                  <div
-                    style={{
-                      padding: '0.75rem',
-                      background: '#f9fafb',
-                      borderRadius: '6px',
-                      border: '1px solid #e5e7eb',
-                    }}
-                  >
-                    <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>Device Sessions</div>
-                    {siblingDevices.length === 0 ? (
-                      <p style={{ margin: '0.5rem 0 0', fontSize: '0.875rem', color: '#6b7280' }}>
-                        No other signed-in desktops on this account.
-                      </p>
-                    ) : (
-                      <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.5rem' }}>
-                        {siblingDevices.map((device) => (
+                    <div style={{ marginTop: '1rem', display: 'grid', gap: '0.5rem' }}>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Plan:</strong> {localPlanPolicy.plan === 'plus' ? 'Plus' : 'Free local'}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Billing subscription:</strong> {subscriptionStatus === 'active' ? 'Active' : 'Inactive'}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Screen Preview:</strong> {localSettings.screenPreviewEnabled ? 'Enabled' : 'Disabled'}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Screen Recording Permission:</strong> {permissionStatus.screenRecording}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Allow Control:</strong> {localSettings.allowControlEnabled ? 'Enabled' : 'Disabled'}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Accessibility Permission:</strong> {permissionStatus.accessibility}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Workspace:</strong> {workspaceState.configured ? workspaceState.rootName || 'Configured' : 'Not configured'}
+                      </div>
+                      <div style={{ fontSize: '0.875rem' }}>
+                        <strong>Provider:</strong> {providerCheckBusy ? 'Checking...' : providerConfigured ? 'Configured' : 'Not configured'}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        marginTop: '1rem',
+                        padding: '0.75rem',
+                        background: taskReadiness.ready ? '#ecfdf5' : '#fff7ed',
+                        border: `1px solid ${taskReadiness.ready ? '#86efac' : '#fdba74'}`,
+                        borderRadius: '6px',
+                        fontSize: '0.875rem',
+                        color: taskReadiness.ready ? '#166534' : '#9a3412',
+                      }}
+                    >
+                      {taskReadiness.ready
+                        ? 'This desktop is ready to launch work directly.'
+                        : `Launching work is blocked by ${taskReadiness.blockers.length} readiness item${taskReadiness.blockers.length === 1 ? '' : 's'}.`}
+                    </div>
+
+                    {taskReadiness.blockers.length > 0 && (
+                      <div style={{ marginTop: '0.75rem', display: 'grid', gap: '0.5rem' }}>
+                        {taskReadiness.blockers.map((blocker) => (
                           <div
-                            key={device.deviceId}
+                            key={blocker.id}
                             style={{
                               padding: '0.75rem',
-                              background: 'white',
+                              background: '#f9fafb',
                               borderRadius: '6px',
                               border: '1px solid #e5e7eb',
                             }}
                           >
-                            <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>
-                              {device.deviceName || `Desktop-${device.deviceId.slice(0, 8)}`}
+                            <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{blocker.label}</div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.8125rem', color: '#6b7280' }}>{blocker.detail}</div>
+                            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
+                              {blocker.id === 'screen-preview' && (
+                                <button
+                                  onClick={() => handleScreenPreviewToggle(true)}
+                                  style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                                >
+                                  Enable Screen Preview
+                                </button>
+                              )}
+                              {blocker.id === 'control-toggle' && (
+                                <button
+                                  onClick={() => handleControlToggle(true)}
+                                  style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                                >
+                                  Enable Allow Control
+                                </button>
+                              )}
+                              {(blocker.id === 'screen-permission' || blocker.id === 'accessibility-permission') && (
+                                <button
+                                  onClick={() => void handleOpenPermissionSettings(blocker.id === 'screen-permission' ? 'screenRecording' : 'accessibility')}
+                                  style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                                >
+                                  Open Permission Settings
+                                </button>
+                              )}
+                              {(blocker.id === 'workspace' || blocker.id === 'provider') && (
+                                <button
+                                  onClick={() => setSettingsOpen(true)}
+                                  style={{ padding: '0.45rem 0.65rem', borderRadius: '6px', border: '1px solid #d1d5db', background: 'white', cursor: 'pointer' }}
+                                >
+                                  Open Settings
+                                </button>
+                              )}
                             </div>
-                            <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                              {device.platform} • {device.connected ? 'Connected' : 'Offline'} • Last seen {new Date(device.lastSeenAt).toLocaleString()}
-                            </div>
-                            <button
-                              onClick={() => {
-                                void handleRevokeDesktopDevice(device.deviceId);
-                              }}
-                              disabled={deviceRevokeBusyId === device.deviceId}
-                              style={{
-                                marginTop: '0.5rem',
-                                padding: '0.45rem 0.65rem',
-                                borderRadius: '6px',
-                                border: '1px solid #fdba74',
-                                background: deviceRevokeBusyId === device.deviceId ? '#e5e7eb' : '#fff7ed',
-                                color: deviceRevokeBusyId === device.deviceId ? '#6b7280' : '#9a3412',
-                                cursor: deviceRevokeBusyId === device.deviceId ? 'not-allowed' : 'pointer',
-                              }}
-                            >
-                              {deviceRevokeBusyId === device.deviceId ? 'Revoking...' : 'Revoke session'}
-                            </button>
                           </div>
                         ))}
                       </div>
                     )}
-                  </div>
-                </div>
-              )}
-            </section>
+                  </section>
 
-            <div
-              style={{
-                marginTop: '1rem',
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-                gap: '1rem',
-              }}
-            >
-              <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-                <h2 style={{ margin: 0, fontSize: '1rem' }}>Pending Approvals</h2>
-                <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-                  Local approvals remain mandatory and are shown here before execution.
-                </p>
+                  <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+                    <h2 style={{ margin: 0, fontSize: '1rem' }}>Devices</h2>
+                    <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+                      Manage the signed-in desktop session and any other desktops on this account.
+                    </p>
 
-                {pendingApprovals.length === 0 ? (
-                  <p style={{ marginTop: '1rem', fontSize: '0.875rem', color: '#6b7280' }}>
-                    No pending approvals.
-                  </p>
-                ) : (
-                  <div style={{ marginTop: '1rem', display: 'grid', gap: '0.5rem' }}>
-                    {pendingApprovals.map((item) => (
+                    {desktopAccountBusy && (
+                      <p style={{ marginTop: '0.75rem', fontSize: '0.875rem', color: '#6b7280' }}>
+                        Loading device sessions...
+                      </p>
+                    )}
+
+                    {desktopAccountError && (
                       <div
-                        key={item.id}
                         style={{
+                          marginTop: '0.75rem',
                           padding: '0.75rem',
-                          background: '#f9fafb',
+                          background: '#fef2f2',
+                          border: '1px solid #fecaca',
                           borderRadius: '6px',
-                          border: '1px solid #e5e7eb',
+                          fontSize: '0.875rem',
+                          color: '#991b1b',
                         }}
                       >
-                        <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{item.summary}</div>
-                        <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                          {item.source} • {item.kind} • expires {new Date(item.expiresAt).toLocaleTimeString()}
+                        {desktopAccountError}
+                      </div>
+                    )}
+
+                    {desktopAccount && (
+                      <div
+                        style={{
+                          marginTop: '1rem',
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                          gap: '1rem',
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: '0.75rem',
+                            background: '#f9fafb',
+                            borderRadius: '6px',
+                            border: '1px solid #e5e7eb',
+                          }}
+                        >
+                          <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>Current desktop</div>
+                          <div style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
+                            {desktopAccount.currentDevice?.deviceName || `Desktop-${deviceId.slice(0, 8)}`}
+                          </div>
+                          <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                            {desktopAccount.user.email} • {desktopAccount.billing.subscriptionStatus === 'active' ? 'Subscription active' : 'Subscription inactive'}
+                          </div>
+                          {desktopAccount.currentDevice && (
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                              {desktopAccount.currentDevice.platform} • {desktopAccount.currentDevice.connected ? 'Connected' : 'Offline'}
+                            </div>
+                          )}
+                        </div>
+
+                        <div
+                          style={{
+                            padding: '0.75rem',
+                            background: '#f9fafb',
+                            borderRadius: '6px',
+                            border: '1px solid #e5e7eb',
+                          }}
+                        >
+                          <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>Device sessions</div>
+                          {siblingDevices.length === 0 ? (
+                            <p style={{ margin: '0.5rem 0 0', fontSize: '0.875rem', color: '#6b7280' }}>
+                              No other signed-in desktops on this account.
+                            </p>
+                          ) : (
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.5rem' }}>
+                              {siblingDevices.map((device) => (
+                                <div
+                                  key={device.deviceId}
+                                  style={{
+                                    padding: '0.75rem',
+                                    background: 'white',
+                                    borderRadius: '6px',
+                                    border: '1px solid #e5e7eb',
+                                  }}
+                                >
+                                  <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>
+                                    {device.deviceName || `Desktop-${device.deviceId.slice(0, 8)}`}
+                                  </div>
+                                  <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                                    {device.platform} • {device.connected ? 'Connected' : 'Offline'} • Last seen {new Date(device.lastSeenAt).toLocaleString()}
+                                  </div>
+                                  <button
+                                    onClick={() => {
+                                      void handleRevokeDesktopDevice(device.deviceId);
+                                    }}
+                                    disabled={deviceRevokeBusyId === device.deviceId}
+                                    style={{
+                                      marginTop: '0.5rem',
+                                      padding: '0.45rem 0.65rem',
+                                      borderRadius: '6px',
+                                      border: '1px solid #fdba74',
+                                      background: deviceRevokeBusyId === device.deviceId ? '#e5e7eb' : '#fff7ed',
+                                      color: deviceRevokeBusyId === device.deviceId ? '#6b7280' : '#9a3412',
+                                      cursor: deviceRevokeBusyId === device.deviceId ? 'not-allowed' : 'pointer',
+                                    }}
+                                  >
+                                    {deviceRevokeBusyId === device.deviceId ? 'Revoking...' : 'Revoke session'}
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </div>
-                    ))}
+                    )}
+                  </section>
+
+                  <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
+                    <h2 style={{ margin: 0, fontSize: '1rem' }}>Recent activity</h2>
+                    <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+                      Previous assistant work on this desktop still uses the existing backend run model, but stays secondary to the chat.
+                    </p>
+
+                    {recentRuns.length === 0 ? (
+                      <p style={{ marginTop: '1rem', fontSize: '0.875rem', color: '#6b7280' }}>
+                        No recent assistant activity yet.
+                      </p>
+                    ) : (
+                      <div style={{ marginTop: '1rem', display: 'grid', gap: '0.5rem' }}>
+                        {recentRuns.map((run) => (
+                          <button
+                            key={run.runId}
+                            onClick={() => handleSelectRecentRun(run.runId)}
+                            style={{
+                              textAlign: 'left',
+                              padding: '0.75rem',
+                              background: activeRun?.runId === run.runId ? '#eff6ff' : '#f9fafb',
+                              border: activeRun?.runId === run.runId ? '1px solid #93c5fd' : '1px solid #e5e7eb',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{run.goal}</div>
+                            <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                              {run.status} • {new Date(run.createdAt).toLocaleString()}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </div>
+
+                {client && (
+                  <div
+                    style={{
+                      marginTop: '1rem',
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+                      gap: '1rem',
+                    }}
+                  >
+                    <ScreenPanel
+                      wsClient={client}
+                      deviceId={deviceId}
+                      enabled={localSettings.screenPreviewEnabled}
+                      onToggle={handleScreenPreviewToggle}
+                      onDisplayChange={setPrimaryDisplayId}
+                      permissionStatus={permissionStatus}
+                      onOpenPermissionSettings={handleOpenPermissionSettings}
+                      onPermissionIssue={(message) => notePermissionIssue('screenRecording', message)}
+                    />
+                    <ControlPanel
+                      wsClient={client}
+                      deviceId={deviceId}
+                      enabled={localSettings.allowControlEnabled}
+                      onToggle={handleControlToggle}
+                    />
                   </div>
                 )}
-              </section>
-
-              <section style={{ padding: '1rem', background: 'white', borderRadius: '8px', border: '1px solid #e5e7eb' }}>
-                <h2 style={{ margin: 0, fontSize: '1rem' }}>Recent Tasks</h2>
-                <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-                  Recent runs for this desktop reuse the existing backend run model and stay visible in the web dashboard.
-                </p>
-
-                {recentRuns.length === 0 ? (
-                  <p style={{ marginTop: '1rem', fontSize: '0.875rem', color: '#6b7280' }}>
-                    No recent tasks yet.
-                  </p>
-                ) : (
-                  <div style={{ marginTop: '1rem', display: 'grid', gap: '0.5rem' }}>
-                    {recentRuns.map((run) => (
-                      <button
-                        key={run.runId}
-                        onClick={() => handleSelectRecentRun(run.runId)}
-                        style={{
-                          textAlign: 'left',
-                          padding: '0.75rem',
-                          background: activeRun?.runId === run.runId ? '#eff6ff' : '#f9fafb',
-                          border: activeRun?.runId === run.runId ? '1px solid #93c5fd' : '1px solid #e5e7eb',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{run.goal}</div>
-                        <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                          {run.mode || 'manual'} • {run.status} • {new Date(run.createdAt).toLocaleString()}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </section>
-            </div>
+              </div>
+            </details>
           </>
-        )}
-
-        {/* Screen Panel */}
-        {client && isSignedIn && (
-          <ScreenPanel 
-            wsClient={client} 
-            deviceId={deviceId} 
-            enabled={localSettings.screenPreviewEnabled}
-            onToggle={handleScreenPreviewToggle}
-            onDisplayChange={setPrimaryDisplayId}
-            permissionStatus={permissionStatus}
-            onOpenPermissionSettings={handleOpenPermissionSettings}
-            onPermissionIssue={(message) => notePermissionIssue('screenRecording', message)}
-          />
-        )}
-
-        {/* Control Panel */}
-        {client && isSignedIn && (
-          <ControlPanel 
-            wsClient={client} 
-            deviceId={deviceId} 
-            enabled={localSettings.allowControlEnabled}
-            onToggle={handleControlToggle}
-          />
         )}
 
         {/* Input Permission Error */}
@@ -2232,27 +2617,96 @@ function App() {
           </div>
         )}
 
+        {isSignedIn && (
+          <section
+            style={{
+              marginTop: '1rem',
+              padding: '1rem',
+              background: 'white',
+              borderRadius: '8px',
+              border: '1px solid #e5e7eb',
+            }}
+          >
+            <h2 style={{ margin: 0, fontSize: '1rem' }}>Pending approvals</h2>
+            <p style={{ margin: '0.35rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+              The assistant pauses here before privileged local actions or tools run.
+            </p>
+
+            {pendingApprovals.length === 0 ? (
+              <p style={{ marginTop: '1rem', fontSize: '0.875rem', color: '#6b7280' }}>
+                No approvals are waiting right now.
+              </p>
+            ) : (
+              <div style={{ marginTop: '1rem', display: 'grid', gap: '0.5rem' }}>
+                {pendingApprovals.map((item) => (
+                  <div
+                    key={item.id}
+                    style={{
+                      padding: '0.75rem',
+                      background: '#f9fafb',
+                      borderRadius: '6px',
+                      border: '1px solid #e5e7eb',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{item.summary}</div>
+                    <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#6b7280' }}>
+                      {item.source} • {item.kind} • expires {new Date(item.expiresAt).toLocaleTimeString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
         <p style={{ marginTop: '2rem', color: '#666', maxWidth: '600px' }}>
           {isSignedIn
-            ? 'This desktop is connected directly to your account. Live runs, approvals, and device controls appear here.'
-            : 'Sign in from this desktop to connect it to your account and unlock local runs, approvals, and device controls.'}
+            ? 'This desktop is connected directly to your account. The assistant runs here, and local approvals stay on this machine.'
+            : 'Sign in from this desktop to connect it to your account and unlock the local assistant, approvals, and device controls.'}
         </p>
         
         {isSignedIn && isAiAssist && (
           <p style={{ color: '#8b5cf6', maxWidth: '600px' }}>
-            🤖 <strong>AI Assist Mode:</strong> The AI will analyze your screen and propose actions one at a time.
-            Every action requires your explicit approval before execution.
+            🤖 <strong>Assistant safety:</strong> The desktop observes what is on screen, proposes one step at a time, and waits for your explicit approval before privileged actions.
           </p>
         )}
       </div>
 
-      {/* Chat Overlay */}
-      {isSignedIn && (
-        <ChatOverlay
-          messages={messages}
-          status={status}
-          onSendMessage={handleSendMessage}
-        />
+      {isOverlayActive && (
+        <>
+          <ActiveOverlayShell
+            statusLabel={overlayStatusLabel}
+            goal={overlayGoal}
+            overlaySupported={overlayModeStatus?.supported !== false}
+          />
+          {overlayDetailsOpen && (
+            <OverlayDetailsPanel
+              goal={overlayGoal}
+              statusLabel={overlayStatusLabel}
+              runStatus={activeRun?.status ?? null}
+              providerLabel={getLlmProviderLabel(llmSettings.provider)}
+              workspaceLabel={overlayWorkspaceLabel}
+              readinessBlockers={assistantReadiness.blockers}
+              pendingApprovals={pendingApprovals}
+              onClose={() => setOverlayDetailsOpen(false)}
+              onOpenSettings={() => {
+                setOverlayDetailsOpen(false);
+                setSettingsOpen(true);
+              }}
+            />
+          )}
+          <OverlayController
+            messages={overlayPreviewMessages}
+            statusLabel={overlayStatusLabel}
+            goal={overlayGoal}
+            providerLabel={getLlmProviderLabel(llmSettings.provider)}
+            isPaused={aiState?.status === 'paused'}
+            detailsOpen={overlayDetailsOpen}
+            onStop={handleStopAi}
+            onPauseToggle={handleToggleAiPause}
+            onOpenDetails={() => setOverlayDetailsOpen((current) => !current)}
+          />
+        </>
       )}
 
       {/* Approval Modal */}
@@ -2260,6 +2714,8 @@ function App() {
         <ApprovalModal
           approval={pendingApproval.approval}
           onDecision={handleApprovalDecision}
+          overlayMode={isOverlayActive}
+          onStopAll={handleStopAll}
         />
       )}
 
@@ -2271,6 +2727,8 @@ function App() {
           action={pendingControlPayload.action}
           onApprove={handleActionApprove}
           onDeny={handleActionDeny}
+          overlayMode={isOverlayActive}
+          onStopAll={handleStopAll}
         />
       )}
 
@@ -2281,15 +2739,8 @@ function App() {
           rationale={pendingToolProposal.rationale}
           onApprove={handleAiApproveTool}
           onDeny={handleAiRejectTool}
-        />
-      )}
-
-      {/* AI Engineering System - Agent Workflow */}
-      {agentWorkflowOpen && (
-        <AgentWorkflow
-          isOpen={agentWorkflowOpen}
-          onClose={() => setAgentWorkflowOpen(false)}
-          workspaceName={workspaceState.rootName || 'workspace'}
+          overlayMode={isOverlayActive}
+          onStopAll={handleStopAll}
         />
       )}
 
@@ -2298,6 +2749,8 @@ function App() {
         <SettingsPanel
           isOpen={settingsOpen}
           onClose={() => setSettingsOpen(false)}
+          llmSettings={llmSettings}
+          onLlmSettingsChange={setLlmSettings}
           localSettings={localSettings}
           autostartSupported={autostartSupported}
           autostartBusy={autostartBusy}

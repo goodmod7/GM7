@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { evaluateDesktopTaskReadiness } from '../apps/desktop/src/lib/taskReadiness.ts';
 
-test('ai assist readiness reports each missing blocker before desktop task creation', () => {
+test('ai assist readiness reports local blockers without treating billing as a hard stop for free local AI', () => {
   const readiness = evaluateDesktopTaskReadiness({
     mode: 'ai_assist',
     subscriptionStatus: 'inactive',
@@ -23,11 +23,11 @@ test('ai assist readiness reports each missing blocker before desktop task creat
   assert.equal(readiness.ready, false);
   assert.deepEqual(
     readiness.blockers.map((blocker) => blocker.id),
-    ['subscription', 'screen-preview', 'screen-permission', 'control-toggle', 'accessibility-permission', 'workspace', 'provider']
+    ['screen-preview', 'screen-permission', 'control-toggle', 'accessibility-permission', 'workspace', 'provider']
   );
 });
 
-test('manual desktop runs ignore provider and workspace blockers but still require subscription and local control readiness', () => {
+test('manual desktop runs ignore provider and workspace blockers and only require local control readiness', () => {
   const readiness = evaluateDesktopTaskReadiness({
     mode: 'manual',
     subscriptionStatus: 'active',
@@ -52,10 +52,10 @@ test('manual desktop runs ignore provider and workspace blockers but still requi
   );
 });
 
-test('desktop task readiness becomes ready when subscription, permissions, workspace, and provider are satisfied', () => {
+test('desktop task readiness becomes ready when local permissions, workspace, and provider are satisfied even on the free plan', () => {
   const readiness = evaluateDesktopTaskReadiness({
     mode: 'ai_assist',
-    subscriptionStatus: 'active',
+    subscriptionStatus: 'inactive',
     permissionStatus: {
       screenRecording: 'granted',
       accessibility: 'granted',

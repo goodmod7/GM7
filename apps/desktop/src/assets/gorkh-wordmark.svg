@@ -1,0 +1,54 @@
+<svg width="720" height="180" viewBox="0 0 720 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gorkh-metal" x1="76" y1="36" x2="644" y2="144" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F7F9FC"/>
+      <stop offset="0.3" stop-color="#C8D0DA"/>
+      <stop offset="0.58" stop-color="#FFFFFF"/>
+      <stop offset="0.82" stop-color="#A7B0BB"/>
+      <stop offset="1" stop-color="#EEF2F7"/>
+    </linearGradient>
+    <linearGradient id="gorkh-sheen" x1="132" y1="28" x2="588" y2="156" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.8"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.18"/>
+    </linearGradient>
+    <filter id="gorkh-glow" x="0" y="0" width="720" height="180" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.82 0 0 0 0 0.86 0 0 0 0 0.92 0 0 0 0.16 0"/>
+    </filter>
+  </defs>
+
+  <rect width="720" height="180" rx="18" fill="#000000"/>
+  <rect x="14" y="14" width="692" height="152" rx="12" fill="#050608" stroke="#1A1D22" stroke-width="1.5"/>
+  <path d="M116 40H606" stroke="#10131A" stroke-width="2" stroke-linecap="round"/>
+  <path d="M116 140H606" stroke="#0E1116" stroke-width="2" stroke-linecap="round"/>
+
+  <g filter="url(#gorkh-glow)">
+    <text
+      x="78"
+      y="122"
+      fill="#DDE3EA"
+      font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+      font-size="86"
+      font-weight="700"
+      letter-spacing="0.42em"
+    >
+      GORKH
+    </text>
+  </g>
+
+  <text
+    x="78"
+    y="122"
+    fill="url(#gorkh-metal)"
+    font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+    font-size="86"
+    font-weight="700"
+    letter-spacing="0.42em"
+  >
+    GORKH
+  </text>
+
+  <path d="M86 58H634L610 74H110L86 58Z" fill="url(#gorkh-sheen)" opacity="0.78"/>
+  <path d="M96 132H624" stroke="#12161B" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

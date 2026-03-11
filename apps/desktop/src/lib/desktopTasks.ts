@@ -5,6 +5,9 @@ export interface DesktopBillingSnapshot {
   subscriptionStatus: 'active' | 'inactive';
   subscriptionCurrentPeriodEnd: string | null;
   planPriceId: string | null;
+  localAiPlan: 'free' | 'plus';
+  freeLocalTaskLimit: number | null;
+  visionBoostIncluded: boolean;
 }
 
 export interface DesktopTaskBootstrap {

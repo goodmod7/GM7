@@ -2,6 +2,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type Event } from '@tauri-apps/api/event';
+import type { AgentProposal } from '@ai-operator/shared';
 
 export type ProviderType = 'native_qwen_ollama' | 'local_openai_compat' | 'openai' | 'claude';
 
@@ -49,6 +50,8 @@ export type AgentEvent =
   | { eventType: 'task_started'; taskId: string; goal: string }
   | { eventType: 'plan_created'; taskId: string; plan: TaskPlan }
   | { eventType: 'step_started'; taskId: string; stepNumber: number; step: PlanStep }
+  | { eventType: 'screen_observed'; taskId: string; observation: unknown }
+  | { eventType: 'proposal_ready'; taskId: string; stepId: string; proposal: AgentProposal }
   | { eventType: 'action_proposed'; taskId: string; stepId: string; actionType: string; summary: string }
   | { eventType: 'action_approved'; taskId: string; stepId: string }
   | { eventType: 'action_denied'; taskId: string; stepId: string; reason: string }
@@ -62,37 +65,7 @@ export type AgentEvent =
 
 // List available providers
 export async function listProviders(): Promise<ProviderInfo[]> {
-  // Mock implementation - in real app this would call Tauri
-  return [
-    {
-      providerType: 'native_qwen_ollama',
-      name: 'Local Qwen (Ollama)',
-      available: true,
-      isFree: true,
-      supportsVision: true,
-    },
-    {
-      providerType: 'local_openai_compat',
-      name: 'Local OpenAI-compatible',
-      available: false,
-      isFree: true,
-      supportsVision: true,
-    },
-    {
-      providerType: 'openai',
-      name: 'OpenAI GPT-4o',
-      available: true,
-      isFree: false,
-      supportsVision: true,
-    },
-    {
-      providerType: 'claude',
-      name: 'Claude 3.5 Sonnet',
-      available: true,
-      isFree: false,
-      supportsVision: true,
-    },
-  ];
+  return invoke('list_agent_providers');
 }
 
 // Test provider connection
@@ -110,12 +83,25 @@ export async function hasProviderApiKey(provider: ProviderType): Promise<boolean
   return invoke('has_provider_api_key', { providerType: provider });
 }
 
+export interface StartAgentTaskOptions {
+  preferredProvider?: ProviderType;
+  credentialProvider?: string;
+  providerBaseUrl?: string;
+  providerModel?: string;
+}
+
 // Start a new agent task
 export async function startAgentTask(
   goal: string,
-  preferredProvider?: ProviderType
+  options?: StartAgentTaskOptions
 ): Promise<string> {
-  return invoke('start_agent_task', { goal, preferredProvider });
+  return invoke('start_agent_task', {
+    goal,
+    preferredProvider: options?.preferredProvider,
+    credentialProvider: options?.credentialProvider,
+    providerBaseUrl: options?.providerBaseUrl,
+    providerModel: options?.providerModel,
+  });
 }
 
 // Get current task status
@@ -126,6 +112,18 @@ export async function getAgentTaskStatus(): Promise<AgentTask | null> {
 // Cancel current task
 export async function cancelAgentTask(): Promise<void> {
   return invoke('cancel_agent_task');
+}
+
+export async function approveAgentProposal(): Promise<void> {
+  return invoke('approve_agent_proposal');
+}
+
+export async function denyAgentProposal(reason?: string): Promise<void> {
+  return invoke('deny_agent_proposal', { reason });
+}
+
+export async function submitAgentUserResponse(response: string): Promise<void> {
+  return invoke('submit_agent_user_response', { response });
 }
 
 // Subscribe to agent events

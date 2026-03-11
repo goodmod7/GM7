@@ -34,14 +34,14 @@ export function getPermissionInstructions(target: PermissionTarget): string[] {
       return [
         'Open System Settings.',
         'Go to Privacy & Security > Screen Recording.',
-        'Enable access for AI Operator Desktop, then restart the app if macOS asks you to.',
+        'Enable access for GORKH Desktop, then restart the app if macOS asks you to.',
       ];
     }
 
     return [
       'Open System Settings.',
       'Go to Privacy & Security > Accessibility.',
-      'Enable access for AI Operator Desktop so it can inject approved input.',
+      'Enable access for GORKH Desktop so it can inject approved input.',
     ];
   }
 

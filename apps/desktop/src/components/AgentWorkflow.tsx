@@ -1,6 +1,6 @@
 /**
- * AI Engineering System - Agent Workflow UI
- * Desktop interface for the 5-phase spec-driven development workflow
+ * Experimental AI Engineering Workflow UI
+ * Secondary debug surface for the 5-phase spec-driven development workflow
  */
 
 import { useState, useCallback } from 'react';
@@ -194,9 +194,9 @@ export function AgentWorkflow({ isOpen, onClose, workspaceName }: AgentWorkflowP
           alignItems: 'center',
         }}>
           <div>
-            <h2 style={{ margin: 0, fontSize: '1.5rem' }}>🚀 AI Engineering System</h2>
+            <h2 style={{ margin: 0, fontSize: '1.5rem' }}>🚀 Experimental AI Engineering Workflow</h2>
             <p style={{ margin: '0.25rem 0 0', color: '#666', fontSize: '0.875rem' }}>
-              Spec-driven development with 5-phase workflow
+              Secondary debug workflow. The retail desktop assistant does not depend on this surface.
             </p>
           </div>
           <button

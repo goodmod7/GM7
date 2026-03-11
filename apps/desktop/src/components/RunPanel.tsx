@@ -48,7 +48,7 @@ export function RunPanel({
   if (!run) {
     return (
       <div style={{ padding: '1rem', background: '#f9fafb', borderRadius: '8px', color: '#666' }}>
-        No active task. Start one from the desktop task composer.
+        No active task yet. Ask the assistant to start working from chat.
       </div>
     );
   }
@@ -127,7 +127,7 @@ export function RunPanel({
     <div style={{ padding: '1.5rem', background: 'white', borderRadius: '8px', border: '1px solid #e0e0e0' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: '1.125rem' }}>Active Run</h2>
+          <h2 style={{ margin: 0, fontSize: '1.125rem' }}>Task progress</h2>
           <p style={{ margin: '0.25rem 0 0', color: '#666', fontSize: '0.875rem' }}>{run.goal}</p>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
@@ -155,7 +155,7 @@ export function RunPanel({
                 fontWeight: 500,
               }}
             >
-              AI Assist
+              Assistant
             </span>
           )}
         </div>

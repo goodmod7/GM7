@@ -72,4 +72,7 @@ test('desktop account helper builds current-device-first account snapshots and p
     'current desktop should be first without dropping sibling desktop sessions'
   );
   assert.equal(snapshot.billing.subscriptionStatus, 'active');
+  assert.equal(snapshot.billing.localAiPlan, 'plus');
+  assert.equal(snapshot.billing.freeLocalTaskLimit, null);
+  assert.equal(snapshot.billing.visionBoostIncluded, true);
 });

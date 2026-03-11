@@ -3,7 +3,6 @@ import type { LocalSettingsState } from './localSettings.js';
 import type { NativePermissionStatus } from './permissions.js';
 
 export type DesktopTaskBlockerId =
-  | 'subscription'
   | 'screen-preview'
   | 'screen-permission'
   | 'control-toggle'
@@ -35,14 +34,6 @@ export function evaluateDesktopTaskReadiness(
   input: EvaluateDesktopTaskReadinessInput
 ): DesktopTaskReadiness {
   const blockers: DesktopTaskBlocker[] = [];
-
-  if (input.subscriptionStatus !== 'active') {
-    blockers.push({
-      id: 'subscription',
-      label: 'Subscription required',
-      detail: 'An active subscription is required before this desktop can start tasks.',
-    });
-  }
 
   if (!input.localSettings.screenPreviewEnabled) {
     blockers.push({

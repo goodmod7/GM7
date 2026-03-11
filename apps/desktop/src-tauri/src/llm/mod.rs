@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub mod claude;
+pub mod native_ollama;
 pub mod openai;
 pub mod openai_compat;
 
@@ -135,12 +137,35 @@ pub trait LlmProvider: Send + Sync {
 /// Create an LLM provider based on the provider name
 pub fn create_provider(provider: &str) -> Result<Box<dyn LlmProvider>, LlmError> {
     match provider {
+        "native_qwen_ollama" => Ok(Box::new(native_ollama::NativeOllamaProvider)),
+        "claude" => Ok(Box::new(claude::ClaudeProvider::new())),
+        "deepseek" => Ok(Box::new(openai_compat::OpenAiCompatProvider)),
+        "minimax" => Ok(Box::new(openai_compat::OpenAiCompatProvider)),
+        "kimi" => Ok(Box::new(openai_compat::OpenAiCompatProvider)),
         "openai" => Ok(Box::new(openai::OpenAiProvider)),
         "openai_compat" => Ok(Box::new(openai_compat::OpenAiCompatProvider)),
         _ => Err(LlmError {
             code: "UNSUPPORTED_PROVIDER".to_string(),
             message: format!("Provider '{}' is not supported", provider),
         }),
+    }
+}
+
+pub fn build_openai_chat_completions_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        format!("{}/chat/completions", trimmed)
+    } else {
+        format!("{}/v1/chat/completions", trimmed)
+    }
+}
+
+pub fn build_anthropic_messages_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        format!("{}/messages", trimmed)
+    } else {
+        format!("{}/v1/messages", trimmed)
     }
 }
 

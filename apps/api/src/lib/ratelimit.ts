@@ -53,6 +53,10 @@ function consumeRateLimitMemory(key: string, limit: number, windowMs: number): R
   };
 }
 
+function getRedisBucketKey(key: string, bucket: number): string {
+  return `ratelimit:${key}:${bucket}`;
+}
+
 export async function consumeRateLimit(
   key: string,
   limit: number,
@@ -64,7 +68,10 @@ export async function consumeRateLimit(
     return consumeRateLimitMemory(key, limit, windowMs);
   }
 
-  const counterKey = `ratelimit:${key}:${Math.floor(Date.now() / windowMs)}`;
+  const now = Date.now();
+  const currentBucket = Math.floor(now / windowMs);
+  const elapsedInBucketMs = now - (currentBucket * windowMs);
+  const counterKey = getRedisBucketKey(key, currentBucket);
   const count = await redisClient.incr(options.redisUrl, counterKey);
   if (count === null) {
     warnRedisFallbackOnce();
@@ -72,21 +79,28 @@ export async function consumeRateLimit(
   }
 
   if (count === 1) {
-    await redisClient.expire(options.redisUrl, counterKey, Math.max(1, Math.ceil(windowMs / 1000)));
+    const ttlSeconds = Math.max(1, Math.ceil(((2 * windowMs) - elapsedInBucketMs) / 1000));
+    await redisClient.expire(options.redisUrl, counterKey, ttlSeconds);
   }
 
-  if (count > limit) {
-    const ttlMs = await redisClient.pttl(options.redisUrl, counterKey);
+  const previousBucketKey = getRedisBucketKey(key, currentBucket - 1);
+  const previousCountRaw = await redisClient.get(options.redisUrl, previousBucketKey);
+  const previousCount = previousCountRaw == null ? 0 : Number.parseInt(previousCountRaw, 10) || 0;
+  const previousBucketWeight = Math.max(0, (windowMs - elapsedInBucketMs) / windowMs);
+  const effectiveCount = count + (previousCount * previousBucketWeight);
+
+  if (effectiveCount > limit) {
+    const retryAfterMs = Math.max(1, windowMs - elapsedInBucketMs);
     return {
       allowed: false,
       remaining: 0,
-      retryAfterSeconds: Math.max(1, Math.ceil((ttlMs ?? windowMs) / 1000)),
+      retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)),
     };
   }
 
   return {
     allowed: true,
-    remaining: Math.max(0, limit - count),
+    remaining: Math.max(0, Math.floor(limit - effectiveCount)),
     retryAfterSeconds: 0,
   };
 }

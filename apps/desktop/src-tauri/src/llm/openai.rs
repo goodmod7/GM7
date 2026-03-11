@@ -94,7 +94,7 @@ impl LlmProvider for OpenAiProvider {
         };
 
         let response = client
-            .post(format!("{}/chat/completions", params.base_url.trim_end_matches('/')))
+            .post(super::build_openai_chat_completions_url(&params.base_url))
             .header("Authorization", format!("Bearer {}", params.api_key))
             .header("Content-Type", "application/json")
             .json(&request_body)

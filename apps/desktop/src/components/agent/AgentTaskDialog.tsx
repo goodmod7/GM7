@@ -1,4 +1,4 @@
-//! Dialog for starting Advanced Agent tasks
+//! Experimental dialog for the in-progress advanced planning engine
 
 import { useState, useCallback, useEffect } from 'react';
 import { AgentProviderSelector } from './AgentProviderSelector.js';
@@ -57,7 +57,7 @@ export function AgentTaskDialog({ trigger }: AgentTaskDialogProps) {
     setError(null);
 
     try {
-      const taskId = await startAgentTask(goal.trim(), selectedProvider || undefined);
+      const taskId = await startAgentTask(goal.trim(), selectedProvider ? { preferredProvider: selectedProvider } : undefined);
       setActiveTaskId(taskId);
       setGoal('');
       setShowCostWarning(false);
@@ -252,10 +252,10 @@ export function AgentTaskDialog({ trigger }: AgentTaskDialogProps) {
         <div style={styles.header}>
           <h2 style={styles.title}>
             <span>✨</span>
-            Advanced Agent Task
+            Experimental Advanced Engine
           </h2>
           <p style={styles.description}>
-            Describe a task and the AI will autonomously plan and execute it step-by-step.
+            Secondary debug surface for the in-progress advanced planning runtime. It is not the primary retail assistant yet.
           </p>
         </div>
 
@@ -300,7 +300,7 @@ export function AgentTaskDialog({ trigger }: AgentTaskDialogProps) {
             onClick={handleStart}
             disabled={!goal.trim() || starting}
           >
-            {starting ? 'Starting...' : '▶ Start Task'}
+            {starting ? 'Starting...' : '▶ Start Experimental Task'}
           </button>
         </div>
       </>
@@ -322,7 +322,7 @@ export function AgentTaskDialog({ trigger }: AgentTaskDialogProps) {
               color: '#6b21a8',
             }}
           >
-            ✨ Advanced Agent
+            ✨ Experimental Advanced Engine
           </button>
         )}
       </div>

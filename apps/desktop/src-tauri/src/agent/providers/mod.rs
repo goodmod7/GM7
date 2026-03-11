@@ -32,7 +32,7 @@ pub enum ProviderType {
 impl ProviderType {
     pub fn name(&self) -> &'static str {
         match self {
-            ProviderType::NativeQwenOllama => "AI Operator Native",
+            ProviderType::NativeQwenOllama => "GORKH Native",
             ProviderType::LocalOpenAiCompat => "Local (OpenAI-compatible)",
             ProviderType::OpenAi => "OpenAI",
             ProviderType::Claude => "Claude",

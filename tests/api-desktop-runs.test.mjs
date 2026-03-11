@@ -37,6 +37,14 @@ test('desktop run routes authenticate with desktop device sessions and reuse sha
     /createRunForOwnedDevice\(/,
     'Desktop and web run creation should reuse the same helper'
   );
+
+  const desktopRunRoute = source.match(/fastify\.post\('\/desktop\/runs'[\s\S]*?const created = await createRunForOwnedDevice\(/);
+  assert.ok(desktopRunRoute, 'desktop run route should be readable from source');
+  assert.doesNotMatch(
+    desktopRunRoute[0],
+    /requireActiveSubscription/,
+    'desktop-first run creation should not require a paid subscription because free local AI is allowed'
+  );
 });
 
 test('shared run creation persists the existing run model and dispatches run.start for desktop-initiated runs', async () => {

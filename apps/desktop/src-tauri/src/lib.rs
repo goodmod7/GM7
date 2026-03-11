@@ -17,6 +17,7 @@ use tauri::webview::{NewWindowResponse, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 mod llm;
+mod local_ai;
 mod workspace;
 mod agent;
 
@@ -407,6 +408,35 @@ struct TrayRuntimeState {
     menu: Mutex<TrayMenuState>,
 }
 
+#[derive(Default)]
+struct OverlayModeRuntimeState {
+    state: Mutex<OverlayModeState>,
+}
+
+#[derive(Default, Clone)]
+struct OverlayModeState {
+    active: bool,
+    previous: Option<OverlayWindowSnapshot>,
+    last_error: Option<String>,
+}
+
+#[derive(Clone)]
+struct OverlayWindowSnapshot {
+    fullscreen: bool,
+    maximized: bool,
+    decorations: bool,
+    resizable: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OverlayWindowStatusPayload {
+    active: bool,
+    supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
 #[derive(Clone)]
 struct TrayMenuState {
     window_visible: bool,
@@ -668,7 +698,7 @@ async fn handle_desktop_auth_connection(
 
     let body = desktop_auth_html_page(
         "Desktop sign-in complete",
-        "You can return to AI Operator Desktop.",
+        "You can return to GORKH.",
     );
     write_desktop_auth_response(&mut socket, "HTTP/1.1 200 OK", &body).await?;
 
@@ -721,7 +751,7 @@ fn create_autolaunch() -> Result<auto_launch::AutoLaunch, String> {
         .ok_or_else(|| "Executable path is not valid UTF-8".to_string())?;
 
     auto_launch::AutoLaunchBuilder::new()
-        .set_app_name("AI Operator")
+        .set_app_name("GORKH")
         .set_app_path(app_path)
         .build()
         .map_err(|e| format!("Failed to configure auto-start: {}", e))
@@ -802,6 +832,163 @@ fn hide_window_to_tray(window: &tauri::WebviewWindow, runtime: &TrayRuntimeState
 
     let app = window.app_handle();
     let _ = refresh_tray_menu(&app, &guard.clone());
+}
+
+fn overlay_mode_supported() -> bool {
+    cfg!(target_os = "macos") || cfg!(target_os = "windows")
+}
+
+fn capture_overlay_window_snapshot(window: &tauri::WebviewWindow) -> OverlayWindowSnapshot {
+    OverlayWindowSnapshot {
+        fullscreen: window.is_fullscreen().unwrap_or(false),
+        maximized: window.is_maximized().unwrap_or(false),
+        decorations: window.is_decorated().unwrap_or(true),
+        resizable: window.is_resizable().unwrap_or(true),
+    }
+}
+
+fn restore_overlay_window_snapshot(
+    window: &tauri::WebviewWindow,
+    snapshot: &OverlayWindowSnapshot,
+) -> Result<(), String> {
+    window
+        .set_fullscreen(snapshot.fullscreen)
+        .map_err(|e| format!("Failed to restore fullscreen state: {}", e))?;
+    window
+        .set_always_on_top(false)
+        .map_err(|e| format!("Failed to restore always-on-top state: {}", e))?;
+    window
+        .set_decorations(snapshot.decorations)
+        .map_err(|e| format!("Failed to restore window decorations: {}", e))?;
+    window
+        .set_resizable(snapshot.resizable)
+        .map_err(|e| format!("Failed to restore window resize state: {}", e))?;
+    window
+        .set_maximized(snapshot.maximized)
+        .map_err(|e| format!("Failed to restore maximized state: {}", e))?;
+    Ok(())
+}
+
+fn main_window_enter_overlay_mode_impl(
+    app: &AppHandle,
+    runtime: &OverlayModeRuntimeState,
+) -> Result<(), String> {
+    if !overlay_mode_supported() {
+        let mut guard = runtime.state.lock().unwrap();
+        guard.active = false;
+        guard.last_error = Some("Overlay mode is not supported on this OS in this build.".to_string());
+        return Err("Overlay mode is not supported on this OS in this build.".to_string());
+    }
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+
+    let snapshot = capture_overlay_window_snapshot(&window);
+
+    window.show().map_err(|e| format!("Failed to show window for overlay mode: {}", e))?;
+    let _ = window.set_focus();
+    window
+        .set_decorations(false)
+        .map_err(|e| format!("Failed to remove window decorations for overlay mode: {}", e))?;
+    window
+        .set_resizable(false)
+        .map_err(|e| format!("Failed to lock window resizing for overlay mode: {}", e))?;
+    window
+        .set_always_on_top(true)
+        .map_err(|e| format!("Failed to enable always-on-top for overlay mode: {}", e))?;
+    if let Err(error) = window.set_fullscreen(true) {
+        let _ = restore_overlay_window_snapshot(&window, &snapshot);
+        let message = format!("Failed to enter fullscreen overlay mode: {}", error);
+        let mut guard = runtime.state.lock().unwrap();
+        guard.active = false;
+        guard.previous = None;
+        guard.last_error = Some(message.clone());
+        return Err(message);
+    }
+
+    let mut guard = runtime.state.lock().unwrap();
+    guard.active = true;
+    guard.previous = Some(snapshot);
+    guard.last_error = None;
+    Ok(())
+}
+
+fn main_window_exit_overlay_mode_impl(
+    app: &AppHandle,
+    runtime: &OverlayModeRuntimeState,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Main window not found".to_string())?;
+
+    let previous = {
+        let guard = runtime.state.lock().unwrap();
+        guard.previous.clone()
+    };
+
+    if let Some(snapshot) = previous.as_ref() {
+        restore_overlay_window_snapshot(&window, snapshot)?;
+    } else {
+        window
+            .set_fullscreen(false)
+            .map_err(|e| format!("Failed to clear fullscreen overlay mode: {}", e))?;
+        window
+            .set_always_on_top(false)
+            .map_err(|e| format!("Failed to clear always-on-top overlay mode: {}", e))?;
+        window
+            .set_decorations(true)
+            .map_err(|e| format!("Failed to restore window decorations: {}", e))?;
+        window
+            .set_resizable(true)
+            .map_err(|e| format!("Failed to restore window resizing: {}", e))?;
+    }
+
+    let mut guard = runtime.state.lock().unwrap();
+    guard.active = false;
+    guard.previous = None;
+    guard.last_error = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn main_window_enter_overlay_mode(
+    app: AppHandle,
+    runtime: State<'_, OverlayModeRuntimeState>,
+) -> KeyResult {
+    match main_window_enter_overlay_mode_impl(&app, &runtime) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(error) => KeyResult {
+            ok: false,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn main_window_exit_overlay_mode(
+    app: AppHandle,
+    runtime: State<'_, OverlayModeRuntimeState>,
+) -> KeyResult {
+    match main_window_exit_overlay_mode_impl(&app, &runtime) {
+        Ok(()) => KeyResult { ok: true, error: None },
+        Err(error) => KeyResult {
+            ok: false,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn main_window_overlay_status(
+    runtime: State<'_, OverlayModeRuntimeState>,
+) -> OverlayWindowStatusPayload {
+    let guard = runtime.state.lock().unwrap();
+    OverlayWindowStatusPayload {
+        active: guard.active,
+        supported: overlay_mode_supported(),
+        last_error: guard.last_error.clone(),
+    }
 }
 
 #[tauri::command]
@@ -1159,15 +1346,23 @@ struct ProposalError {
 
 #[tauri::command]
 async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResult, ProposalError> {
-    // Retrieve API key from secure storage
-    let entry = keyring_entry(&format!("llm_api_key:{}", params.provider)).map_err(|e| ProposalError {
-        code: "KEYRING_ERROR".to_string(),
-        message: e,
-    })?;
-    let api_key = entry.get_password().map_err(|e| ProposalError {
-        code: "NO_API_KEY".to_string(),
-        message: format!("No API key configured: {}", e),
-    })?;
+    let api_key = match params.provider.as_str() {
+        "native_qwen_ollama" | "openai_compat" => keyring_entry(&format!("llm_api_key:{}", params.provider))
+            .ok()
+            .and_then(|entry| entry.get_password().ok())
+            .unwrap_or_default(),
+        "openai" | "claude" | "deepseek" | "minimax" | "kimi" => {
+            let entry = keyring_entry(&format!("llm_api_key:{}", params.provider)).map_err(|e| ProposalError {
+                code: "KEYRING_ERROR".to_string(),
+                message: e,
+            })?;
+            entry.get_password().map_err(|e| ProposalError {
+                code: "NO_API_KEY".to_string(),
+                message: format!("No API key configured: {}", e),
+            })?
+        }
+        _ => String::new(),
+    };
 
     // Get workspace configuration status
     let workspace_configured = params.workspace_configured.or_else(|| {
@@ -1198,6 +1393,65 @@ async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResu
     })?;
 
     Ok(ProposalResult { proposal })
+}
+
+#[tauri::command]
+async fn local_ai_status(
+    state: State<'_, local_ai::LocalAiRuntimeState>,
+) -> Result<local_ai::LocalAiRuntimeStatus, String> {
+    local_ai::runtime_status(&state).await
+}
+
+#[tauri::command]
+async fn local_ai_install_start(
+    state: State<'_, local_ai::LocalAiRuntimeState>,
+    preferred_tier: Option<String>,
+) -> Result<local_ai::LocalAiInstallProgress, String> {
+    local_ai::install_start(
+        &state,
+        Some(local_ai::LocalAiInstallRequest {
+            preferred_tier,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn local_ai_enable_vision_boost(
+    state: State<'_, local_ai::LocalAiRuntimeState>,
+) -> Result<local_ai::LocalAiInstallProgress, String> {
+    local_ai::enable_vision_boost(&state).await
+}
+
+#[tauri::command]
+fn local_ai_install_progress(
+    state: State<'_, local_ai::LocalAiRuntimeState>,
+) -> Result<local_ai::LocalAiInstallProgress, String> {
+    Ok(local_ai::install_progress(&state))
+}
+
+#[tauri::command]
+async fn local_ai_start(
+    state: State<'_, local_ai::LocalAiRuntimeState>,
+) -> Result<local_ai::LocalAiRuntimeStatus, String> {
+    local_ai::start_runtime(&state).await
+}
+
+#[tauri::command]
+async fn local_ai_stop(
+    state: State<'_, local_ai::LocalAiRuntimeState>,
+) -> Result<local_ai::LocalAiRuntimeStatus, String> {
+    local_ai::stop_runtime(&state).await
+}
+
+#[tauri::command]
+fn local_ai_hardware_profile() -> Result<local_ai::LocalAiHardwareProfile, String> {
+    local_ai::hardware_profile()
+}
+
+#[tauri::command]
+fn local_ai_recommended_tier() -> Result<local_ai::LocalAiTierRecommendation, String> {
+    local_ai::recommended_tier()
 }
 
 // Resize RGBA image
@@ -1312,33 +1566,18 @@ pub struct ProviderInfo {
     pub supports_vision: bool,
 }
 
-/// List available providers
-#[tauri::command]
-async fn list_agent_providers(state: State<'_, AgentState>) -> Result<Vec<ProviderInfo>, String> {
-    let infos = state.router.list_providers().await;
-    
-    Ok(infos.into_iter().map(|p| ProviderInfo {
-        provider_type: format!("{:?}", p.provider_type).to_lowercase(),
-        name: p.name,
-        available: p.available,
-        is_free: p.is_free,
-        supports_vision: p.capabilities.supports_vision,
-    }).collect())
+fn agent_provider_kind(provider_type: &str) -> Result<ProviderType, String> {
+    match provider_type {
+        "native_qwen_ollama" => Ok(ProviderType::NativeQwenOllama),
+        "local_openai_compat" => Ok(ProviderType::LocalOpenAiCompat),
+        "openai" => Ok(ProviderType::OpenAi),
+        "claude" => Ok(ProviderType::Claude),
+        _ => Err(format!("Unknown provider: {}", provider_type)),
+    }
 }
 
-/// Test a provider connection
-#[tauri::command]
-async fn test_provider(provider_type: String) -> Result<bool, String> {
-    let ptype = match provider_type.as_str() {
-        "native_qwen_ollama" => ProviderType::NativeQwenOllama,
-        "local_openai_compat" => ProviderType::LocalOpenAiCompat,
-        "openai" => ProviderType::OpenAi,
-        "claude" => ProviderType::Claude,
-        _ => return Err(format!("Unknown provider: {}", provider_type)),
-    };
-    
-    // Check availability based on provider type
-    match ptype {
+async fn is_agent_provider_available(provider_type: &str) -> Result<bool, String> {
+    match agent_provider_kind(provider_type)? {
         ProviderType::NativeQwenOllama => {
             let provider = agent::providers::NativeOllamaProvider::new(None, None);
             Ok(provider.is_available().await)
@@ -1348,11 +1587,39 @@ async fn test_provider(provider_type: String) -> Result<bool, String> {
             Ok(provider.is_available().await)
         }
         ProviderType::OpenAi | ProviderType::Claude => {
-            // These require API keys, check if key exists
             let key_entry = keyring_entry(&format!("llm_api_key:{}", provider_type))?;
             Ok(key_entry.get_password().is_ok())
         }
     }
+}
+
+/// List available providers
+#[tauri::command]
+async fn list_agent_providers(_state: State<'_, AgentState>) -> Result<Vec<ProviderInfo>, String> {
+    let mut providers = Vec::new();
+
+    for (provider_type, name, is_free, supports_vision) in [
+        ("native_qwen_ollama", "Local Qwen (Ollama)", true, true),
+        ("local_openai_compat", "Local OpenAI-compatible", true, false),
+        ("openai", "OpenAI-compatible cloud", false, true),
+        ("claude", "Claude", false, true),
+    ] {
+        providers.push(ProviderInfo {
+            provider_type: provider_type.to_string(),
+            name: name.to_string(),
+            available: is_agent_provider_available(provider_type).await?,
+            is_free,
+            supports_vision,
+        });
+    }
+
+    Ok(providers)
+}
+
+/// Test a provider connection
+#[tauri::command]
+async fn test_provider(provider_type: String) -> Result<bool, String> {
+    is_agent_provider_available(&provider_type).await
 }
 
 /// Set provider API key (stored in keychain)
@@ -1378,16 +1645,26 @@ async fn start_agent_task(
     state: State<'_, AgentState>,
     goal: String,
     preferred_provider: Option<String>,
+    credential_provider: Option<String>,
+    provider_base_url: Option<String>,
+    provider_model: Option<String>,
 ) -> Result<String, String> {
+    let provider_name = preferred_provider.unwrap_or_else(|| "native_qwen_ollama".to_string());
+    let primary_provider = agent_provider_kind(&provider_name)?;
+    let key_provider = credential_provider.unwrap_or_else(|| provider_name.clone());
+    let provider_api_key = match primary_provider {
+        ProviderType::OpenAi | ProviderType::Claude => keyring_entry(&format!("llm_api_key:{}", key_provider))?
+            .get_password()
+            .ok(),
+        _ => None,
+    };
+
     // Create agent config
     let config = AgentConfig {
-        primary_provider: match preferred_provider.as_deref() {
-            Some("native_qwen_ollama") => ProviderType::NativeQwenOllama,
-            Some("local_openai_compat") => ProviderType::LocalOpenAiCompat,
-            Some("openai") => ProviderType::OpenAi,
-            Some("claude") => ProviderType::Claude,
-            _ => ProviderType::NativeQwenOllama,
-        },
+        primary_provider,
+        provider_base_url,
+        provider_model,
+        provider_api_key,
         ..Default::default()
     };
 
@@ -1429,6 +1706,45 @@ async fn cancel_agent_task(state: State<'_, AgentState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn approve_agent_proposal(state: State<'_, AgentState>) -> Result<(), String> {
+    let guard = state.agent.read().await;
+    if let Some(agent) = guard.as_ref() {
+        return agent.approve_proposal().await.map_err(|error| error.to_string());
+    }
+    Err("No active agent task".to_string())
+}
+
+#[tauri::command]
+async fn deny_agent_proposal(
+    state: State<'_, AgentState>,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let guard = state.agent.read().await;
+    if let Some(agent) = guard.as_ref() {
+        return agent
+            .deny_proposal(reason)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    Err("No active agent task".to_string())
+}
+
+#[tauri::command]
+async fn submit_agent_user_response(
+    state: State<'_, AgentState>,
+    response: String,
+) -> Result<(), String> {
+    let guard = state.agent.read().await;
+    if let Some(agent) = guard.as_ref() {
+        return agent
+            .submit_user_response(response)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    Err("No active agent task".to_string())
+}
+
 /// Start recording a demonstration
 #[tauri::command]
 fn start_recording(goal: String, description: String) -> Result<String, String> {
@@ -1440,7 +1756,9 @@ fn start_recording(goal: String, description: String) -> Result<String, String> 
 pub fn run() {
     let builder = tauri::Builder::default()
         .manage(TrayRuntimeState::default())
+        .manage(OverlayModeRuntimeState::default())
         .manage(DesktopAuthRuntimeState::default())
+        .manage(local_ai::LocalAiRuntimeState::default())
         .manage(AgentState::new())
         .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(tauri_plugin_dialog::init());
@@ -1469,6 +1787,9 @@ pub fn run() {
             tray_update_state,
             main_window_show,
             main_window_hide,
+            main_window_enter_overlay_mode,
+            main_window_exit_overlay_mode,
+            main_window_overlay_status,
             permissions_get_status,
             permissions_open_settings,
             open_external_url,
@@ -1480,6 +1801,14 @@ pub fn run() {
             has_llm_api_key,
             clear_llm_api_key,
             llm_propose_next_action,
+            local_ai_status,
+            local_ai_install_start,
+            local_ai_enable_vision_boost,
+            local_ai_install_progress,
+            local_ai_start,
+            local_ai_stop,
+            local_ai_hardware_profile,
+            local_ai_recommended_tier,
             // Iteration 7: Workspace Tools
             workspace::workspace_configure,
             workspace::workspace_get_state,
@@ -1494,6 +1823,9 @@ pub fn run() {
             start_agent_task,
             get_agent_task_status,
             cancel_agent_task,
+            approve_agent_proposal,
+            deny_agent_proposal,
+            submit_agent_user_response,
             start_recording,
         ])
         .setup(|app| {
@@ -1551,6 +1883,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                let overlay_runtime = window.state::<OverlayModeRuntimeState>();
+                if overlay_runtime.state.lock().unwrap().active {
+                    let _ = main_window_exit_overlay_mode_impl(&window.app_handle(), &overlay_runtime);
+                    return;
+                }
                 let runtime = window.state::<TrayRuntimeState>();
                 if let Some(main_window) = window.app_handle().get_webview_window("main") {
                     hide_window_to_tray(&main_window, &runtime);

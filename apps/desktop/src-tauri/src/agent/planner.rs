@@ -105,7 +105,7 @@ impl<'a> HierarchicalPlanner<'a> {
         let response = self.provider.plan_task(request).await.map_err(|e| e.message)?;
 
         // Parse the JSON response into a TaskPlan
-        let steps: Vec<PlanStep> = serde_json::from_str(&response)
+        let steps = parse_plan_steps(&response)
             .map_err(|e| format!("Failed to parse plan: {}", e))?;
 
         // Ensure all steps have unique IDs
@@ -146,7 +146,7 @@ impl<'a> HierarchicalPlanner<'a> {
 
         let response = self.provider.plan_task(request).await.map_err(|e| e.message)?;
 
-        let steps: Vec<PlanStep> = serde_json::from_str(&response)
+        let steps = parse_plan_steps(&response)
             .map_err(|e| format!("Failed to parse revised plan: {}", e))?;
 
         let mut steps = steps;
@@ -166,6 +166,50 @@ impl<'a> HierarchicalPlanner<'a> {
             required_apps,
         })
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlanStep {
+    #[serde(default)]
+    id: String,
+    title: String,
+    description: String,
+    #[serde(rename = "type", alias = "stepType", alias = "step_type")]
+    step_type: RawStepType,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RawStepType {
+    UiAction,
+    #[serde(alias = "tool")]
+    ToolCall,
+    AskUser,
+    Verification,
+}
+
+fn parse_plan_steps(input: &str) -> Result<Vec<PlanStep>, String> {
+    let raw_steps: Vec<RawPlanStep> = serde_json::from_str(input)
+        .map_err(|e| e.to_string())?;
+
+    Ok(raw_steps
+        .into_iter()
+        .map(|step| PlanStep {
+            id: step.id,
+            title: step.title,
+            description: step.description,
+            step_type: match step.step_type {
+                RawStepType::UiAction => StepType::UiAction,
+                RawStepType::ToolCall => StepType::ToolCall,
+                RawStepType::AskUser => StepType::AskUser,
+                RawStepType::Verification => StepType::Verification,
+            },
+            status: StepStatus::Pending,
+            retry_count: 0,
+            max_retries: 3,
+            is_critical: false,
+        })
+        .collect())
 }
 
 /// Estimate duration based on step count and types

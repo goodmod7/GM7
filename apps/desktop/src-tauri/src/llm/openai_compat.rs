@@ -99,7 +99,7 @@ impl LlmProvider for OpenAiCompatProvider {
             max_tokens: Some(1000),
         };
 
-        let url = format!("{}/v1/chat/completions", params.base_url.trim_end_matches('/'));
+        let url = super::build_openai_chat_completions_url(&params.base_url);
         
         let mut request_builder = client
             .post(&url)

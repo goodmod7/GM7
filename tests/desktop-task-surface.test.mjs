@@ -3,41 +3,31 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const appPath = 'apps/desktop/src/App.tsx';
-const runPanelPath = 'apps/desktop/src/components/RunPanel.tsx';
 const helperPath = 'apps/desktop/src/lib/desktopTasks.ts';
 const accountHelperPath = 'apps/desktop/src/lib/desktopAccount.ts';
 
-test('desktop primary surface exposes a local task composer, readiness panel, approvals panel, and task history', () => {
+test('desktop primary surface exposes an assistant-first shell instead of a run-first task composer', () => {
   const source = readFileSync(appPath, 'utf8');
 
-  assert.match(source, /Readiness/i, 'desktop should show a readiness panel');
-  assert.match(source, /Pending Approvals/i, 'desktop should show a visible approvals panel');
-  assert.match(source, /Recent Tasks/i, 'desktop should show recent task history');
-  assert.match(source, /Create Task|Start Task/i, 'desktop should expose a primary task composer');
+  assert.match(source, /Start Free AI|Set up Free AI/i, 'desktop retail shell should make the free local setup path visible');
+  assert.match(source, /Free plan|Plus plan|unlimited local tasks|Vision Boost/i, 'desktop retail shell should reflect the free-vs-plus local AI posture');
+  assert.match(source, /Settings & details|Debug view|Diagnostics/i, 'desktop should demote technical run details to a secondary view');
+  assert.match(source, /ensureAssistantRunForMessage/, 'desktop chat entry should create or resume a hidden run');
+  assert.doesNotMatch(source, /Create Task|Start Task|Manual launch/i, 'desktop retail surface should not lead with explicit task creation');
+  assert.doesNotMatch(source, /Recent Tasks|Task history/i, 'desktop retail surface should not lead with run history language');
 });
 
-test('desktop task helper uses desktop-authenticated bootstrap and run creation endpoints', () => {
+
+test('desktop task helper still uses desktop-authenticated bootstrap and run creation endpoints', () => {
   const source = readFileSync(helperPath, 'utf8');
 
   assert.match(source, /\/desktop\/me/, 'desktop should bootstrap the signed-in task surface from the desktop API');
   assert.match(source, /\/desktop\/runs/, 'desktop should create runs directly through the desktop API');
 });
 
-test('desktop surface exposes account and device session management helpers', () => {
-  const appSource = readFileSync(appPath, 'utf8');
+test('desktop retains desktop account and device session management helpers while retail UX is simplified', () => {
   const helperSource = readFileSync(accountHelperPath, 'utf8');
 
-  assert.match(appSource, /Account & Devices|Device Sessions/i, 'desktop should expose account/device management on the primary surface');
   assert.match(helperSource, /\/desktop\/account/, 'desktop should load desktop account/device state from the desktop API');
   assert.match(helperSource, /\/desktop\/devices\/\$\{deviceId\}\/revoke/, 'desktop should support remote desktop session revoke');
-});
-
-test('desktop run panel no longer tells users to create runs from the web dashboard', () => {
-  const source = readFileSync(runPanelPath, 'utf8');
-
-  assert.doesNotMatch(
-    source,
-    /Create a run from the web dashboard/,
-    'desktop-first flow should not direct the primary run path back to the dashboard'
-  );
 });

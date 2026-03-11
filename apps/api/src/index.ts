@@ -426,10 +426,14 @@ function getBillingSnapshot(user: {
   subscriptionCurrentPeriodEnd?: Date | null;
   planPriceId?: string | null;
 }) {
+  const active = user.subscriptionStatus === 'active';
   return {
-    subscriptionStatus: user.subscriptionStatus === 'active' ? 'active' : 'inactive',
+    subscriptionStatus: active ? 'active' : 'inactive',
     subscriptionCurrentPeriodEnd: user.subscriptionCurrentPeriodEnd?.toISOString() ?? null,
     planPriceId: user.planPriceId ?? null,
+    localAiPlan: active ? 'plus' : 'free',
+    freeLocalTaskLimit: active ? null : 5,
+    visionBoostIncluded: active,
   };
 }
 
@@ -1244,10 +1248,6 @@ fastify.post('/desktop/runs', async (request, reply) => {
   if (!user) {
     reply.status(401);
     return { error: 'Unauthorized' };
-  }
-
-  if (!(await requireActiveSubscription(request, reply, user))) {
-    return;
   }
 
   const { goal, mode } = request.body as {

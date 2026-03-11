@@ -125,10 +125,9 @@ impl LlmProvider for ClaudeProvider {
     }
 
     async fn is_available(&self) -> bool {
-        match self.messages("You are a test.", "Say 'ok' only.", None).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        self.messages("You are a test.", "Say 'ok' only.", None)
+            .await
+            .is_ok()
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -156,16 +155,20 @@ Output format: Return a JSON array of steps with id, title, description, and typ
         Ok(response.content)
     }
 
-    async fn analyze_screen(&self, request: ScreenAnalysisRequest) -> Result<String, ProviderError> {
+    async fn analyze_screen(
+        &self,
+        request: ScreenAnalysisRequest,
+    ) -> Result<String, ProviderError> {
         let system = r#"Analyze the screenshot and provide structured observations in JSON format with screen_summary, ui_elements, notable_warnings, and inferred_app fields."#;
 
         let user = format!(
             "Goal: {}\n\nPrevious actions: {:?}\n\nAnalyze this screenshot:",
-            request.goal,
-            request.previous_actions
+            request.goal, request.previous_actions
         );
 
-        let response = self.messages(system, &user, Some(&request.screenshot_base64)).await?;
+        let response = self
+            .messages(system, &user, Some(&request.screenshot_base64))
+            .await?;
         Ok(response.content)
     }
 

@@ -33,9 +33,7 @@ impl LocalCompatProvider {
     ) -> Result<LlmResponse, ProviderError> {
         let url = format!("{}/chat/completions", self.endpoint);
 
-        let mut messages = vec![
-            json!({"role": "system", "content": system}),
-        ];
+        let mut messages = vec![json!({"role": "system", "content": system})];
 
         // Build user message
         let user_message = if let Some(img_b64) = image {
@@ -156,7 +154,10 @@ impl LlmProvider for LocalCompatProvider {
         Ok(response.content)
     }
 
-    async fn analyze_screen(&self, request: ScreenAnalysisRequest) -> Result<String, ProviderError> {
+    async fn analyze_screen(
+        &self,
+        request: ScreenAnalysisRequest,
+    ) -> Result<String, ProviderError> {
         // Most local servers don't support vision, so we describe the image in text
         let system = r#"Analyze the described screenshot and provide structured observations in JSON format.
 Since you cannot see the image directly, the user has described it for you."#;

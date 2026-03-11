@@ -79,6 +79,7 @@ impl PlanStep {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_max_retries(mut self, retries: u32) -> Self {
         self.max_retries = retries;
         self
@@ -102,11 +103,15 @@ impl<'a> HierarchicalPlanner<'a> {
             context: None,
         };
 
-        let response = self.provider.plan_task(request).await.map_err(|e| e.message)?;
+        let response = self
+            .provider
+            .plan_task(request)
+            .await
+            .map_err(|e| e.message)?;
 
         // Parse the JSON response into a TaskPlan
-        let steps = parse_plan_steps(&response)
-            .map_err(|e| format!("Failed to parse plan: {}", e))?;
+        let steps =
+            parse_plan_steps(&response).map_err(|e| format!("Failed to parse plan: {}", e))?;
 
         // Ensure all steps have unique IDs
         let mut steps = steps;
@@ -128,6 +133,7 @@ impl<'a> HierarchicalPlanner<'a> {
     }
 
     /// Revise a plan when something goes wrong
+    #[allow(dead_code)]
     pub async fn revise_plan(
         &self,
         current_plan: &TaskPlan,
@@ -144,7 +150,11 @@ impl<'a> HierarchicalPlanner<'a> {
             context: Some(context),
         };
 
-        let response = self.provider.plan_task(request).await.map_err(|e| e.message)?;
+        let response = self
+            .provider
+            .plan_task(request)
+            .await
+            .map_err(|e| e.message)?;
 
         let steps = parse_plan_steps(&response)
             .map_err(|e| format!("Failed to parse revised plan: {}", e))?;
@@ -189,8 +199,7 @@ enum RawStepType {
 }
 
 fn parse_plan_steps(input: &str) -> Result<Vec<PlanStep>, String> {
-    let raw_steps: Vec<RawPlanStep> = serde_json::from_str(input)
-        .map_err(|e| e.to_string())?;
+    let raw_steps: Vec<RawPlanStep> = serde_json::from_str(input).map_err(|e| e.to_string())?;
 
     Ok(raw_steps
         .into_iter()
@@ -216,12 +225,13 @@ fn parse_plan_steps(input: &str) -> Result<Vec<PlanStep>, String> {
 fn estimate_duration(steps: &[PlanStep]) -> u64 {
     let base_time_per_step = 5u64; // seconds
     let total_steps = steps.len() as u64;
-    
+
     // Add extra time for UI actions (they take longer)
-    let ui_action_count = steps.iter()
+    let ui_action_count = steps
+        .iter()
         .filter(|s| matches!(s.step_type, StepType::UiAction))
         .count() as u64;
-    
+
     (total_steps * base_time_per_step) + (ui_action_count * 3)
 }
 
@@ -229,7 +239,7 @@ fn estimate_duration(steps: &[PlanStep]) -> u64 {
 fn detect_required_apps(goal: &str, _steps: &[PlanStep]) -> Vec<String> {
     let goal_lower = goal.to_lowercase();
     let mut apps = Vec::new();
-    
+
     // Common app keywords
     let app_keywords = [
         ("photoshop", "Adobe Photoshop"),
@@ -248,13 +258,13 @@ fn detect_required_apps(goal: &str, _steps: &[PlanStep]) -> Vec<String> {
         ("discord", "Discord"),
         ("spotify", "Spotify"),
     ];
-    
+
     for (keyword, app_name) in app_keywords {
         if goal_lower.contains(keyword) {
             apps.push(app_name.to_string());
         }
     }
-    
+
     apps.dedup();
     apps
 }
@@ -263,10 +273,13 @@ fn detect_required_apps(goal: &str, _steps: &[PlanStep]) -> Vec<String> {
 pub fn create_simple_plan(goal: &str) -> TaskPlan {
     TaskPlan {
         goal: goal.to_string(),
-        steps: vec![
-            PlanStep::new("1", "Analyze task", "Understand what needs to be done", StepType::AskUser)
-                .with_critical(true),
-        ],
+        steps: vec![PlanStep::new(
+            "1",
+            "Analyze task",
+            "Understand what needs to be done",
+            StepType::AskUser,
+        )
+        .with_critical(true)],
         estimated_duration_secs: 10,
         required_apps: vec![],
     }

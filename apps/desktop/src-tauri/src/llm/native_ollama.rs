@@ -27,7 +27,10 @@ struct OllamaResponse {
 
 #[async_trait::async_trait]
 impl LlmProvider for NativeOllamaProvider {
-    async fn propose_next_action(&self, params: &ProposalParams) -> Result<AgentProposal, LlmError> {
+    async fn propose_next_action(
+        &self,
+        params: &ProposalParams,
+    ) -> Result<AgentProposal, LlmError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
@@ -47,15 +50,12 @@ impl LlmProvider for NativeOllamaProvider {
             0,
         );
         let prompt = format!("{system_prompt}\n\n{user_prompt}");
-        let clean_image = params
-            .screenshot_png_base64
-            .as_deref()
-            .map(|value| {
-                value
-                    .strip_prefix("data:image/png;base64,")
-                    .unwrap_or(value)
-                    .to_string()
-            });
+        let clean_image = params.screenshot_png_base64.as_deref().map(|value| {
+            value
+                .strip_prefix("data:image/png;base64,")
+                .unwrap_or(value)
+                .to_string()
+        });
 
         let request_body = OllamaRequest {
             model: params.model.clone(),

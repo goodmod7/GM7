@@ -18,20 +18,27 @@ pub enum ToolCall {
     #[serde(rename = "fs.apply_patch")]
     FsApplyPatch { path: String, patch: String },
     #[serde(rename = "terminal.exec")]
-    TerminalExec { cmd: String, args: Vec<String>, cwd: Option<String> },
+    TerminalExec {
+        cmd: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    },
 }
 
 impl ToolCall {
     /// Returns true if this tool modifies files or executes commands
+    #[allow(dead_code)]
     pub fn is_destructive(&self) -> bool {
-        matches!(self, 
-            ToolCall::FsWriteText { .. } | 
-            ToolCall::FsApplyPatch { .. } |
-            ToolCall::TerminalExec { .. }
+        matches!(
+            self,
+            ToolCall::FsWriteText { .. }
+                | ToolCall::FsApplyPatch { .. }
+                | ToolCall::TerminalExec { .. }
         )
     }
-    
+
     /// Get the target path or command for logging
+    #[allow(dead_code)]
     pub fn target(&self) -> &str {
         match self {
             ToolCall::FsList { path } => path,
@@ -56,7 +63,10 @@ pub enum InputAction {
     #[serde(rename = "type")]
     Type { text: String },
     #[serde(rename = "hotkey")]
-    Hotkey { key: String, modifiers: Option<Vec<String>> },
+    Hotkey {
+        key: String,
+        modifiers: Option<Vec<String>>,
+    },
 }
 
 /// A proposal from the AI agent
@@ -131,7 +141,8 @@ impl std::error::Error for LlmError {}
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Request a proposal from the LLM
-    async fn propose_next_action(&self, params: &ProposalParams) -> Result<AgentProposal, LlmError>;
+    async fn propose_next_action(&self, params: &ProposalParams)
+        -> Result<AgentProposal, LlmError>;
 }
 
 /// Create an LLM provider based on the provider name
@@ -189,7 +200,8 @@ NOTE: All file paths must be relative to the workspace root."#
         "\nNOTE: No workspace configured. Tools are not available."
     };
 
-    format!(r#"You are an AI assistant helping a user accomplish tasks on their computer.
+    format!(
+        r#"You are an AI assistant helping a user accomplish tasks on their computer.
 
 SAFETY RULES:
 1. NEVER perform actions that could be harmful (deleting files, making payments, changing passwords, etc.) without explicit user confirmation
@@ -237,11 +249,7 @@ pub fn build_user_prompt(
     history: &Option<ActionHistory>,
     action_count: u32,
 ) -> String {
-    let mut prompt = format!(
-        "GOAL: {}\n\nACTION COUNT: {}\n\n",
-        goal,
-        action_count
-    );
+    let mut prompt = format!("GOAL: {}\n\nACTION COUNT: {}\n\n", goal, action_count);
 
     if let Some(hist) = history {
         if let Some(actions) = &hist.last_actions {

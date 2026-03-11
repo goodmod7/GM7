@@ -28,11 +28,24 @@ test('desktop release cargo config includes required tray and error dependencies
   );
 });
 
+test('desktop release cargo config enables Tokio macros for select-based auth listener flow', () => {
+  const cargoToml = fs.readFileSync(cargoTomlPath, 'utf8');
+
+  assert.match(
+    cargoToml,
+    /^tokio\s*=\s*\{[^}]*features\s*=\s*\[[^\]]*"macros"[^\]]*\][^}]*\}/m,
+    'desktop Rust crate should enable the tokio macros feature so tokio::select! compiles in release builds',
+  );
+});
+
 test('desktop release config includes a tracked icon asset', () => {
   const tauriConfig = JSON.parse(fs.readFileSync(tauriConfigPath, 'utf8'));
 
   assert.ok(fs.existsSync(iconPath), 'desktop release should include src-tauri/icons/icon.png');
-  assert.ok(fs.existsSync(windowsIconPath), 'desktop release should include src-tauri/icons/icon.ico');
+  assert.ok(
+    fs.existsSync(windowsIconPath),
+    'desktop release should include src-tauri/icons/icon.ico',
+  );
   assert.ok(
     Array.isArray(tauriConfig.bundle?.icon) &&
       tauriConfig.bundle.icon.includes('icons/icon.png'),
@@ -103,7 +116,9 @@ test('desktop rust sources avoid the broken API usage that blocked CI', () => {
   );
 
   assert.ok(
-    !libRs.includes('.plugin(tauri_plugin_dialog::init())\n        .plugin(tauri_plugin_updater::Builder::new().build())'),
+    !libRs.includes(
+      '.plugin(tauri_plugin_dialog::init())\n        .plugin(tauri_plugin_updater::Builder::new().build())',
+    ),
     'desktop beta builds must not initialize the updater plugin as part of the unconditional base builder chain',
   );
 
@@ -111,6 +126,31 @@ test('desktop rust sources avoid the broken API usage that blocked CI', () => {
     libRs,
     /option_env!\("VITE_DESKTOP_UPDATER_ENABLED"\)/,
     'desktop runtime should gate updater plugin initialization on the build-time VITE_DESKTOP_UPDATER_ENABLED flag',
+  );
+});
+
+test('desktop overlay restore uses Tauri 2-compatible maximize APIs', () => {
+  const libRs = fs.readFileSync(libRsPath, 'utf8');
+
+  assert.ok(
+    !libRs.includes('.set_maximized('),
+    'desktop overlay restore should not call the removed WebviewWindow set_maximized API',
+  );
+
+  assert.match(
+    libRs,
+    /if snapshot\.maximized[\s\S]*maximize\(\)[\s\S]*else[\s\S]*unmaximize\(\)/,
+    'desktop overlay restore should use maximize and unmaximize when restoring maximized state',
+  );
+});
+
+test('desktop auth cancel command returns Result for async State-based Tauri command compatibility', () => {
+  const libRs = fs.readFileSync(libRsPath, 'utf8');
+
+  assert.match(
+    libRs,
+    /async fn desktop_auth_listen_cancel\(\s*runtime: State<'_, DesktopAuthRuntimeState>,\s*\) -> Result<KeyResult, String>/,
+    'desktop_auth_listen_cancel should return Result<KeyResult, String> so async Tauri command generation compiles',
   );
 });
 

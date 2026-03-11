@@ -49,7 +49,10 @@ struct OpenAiCompatResponseMessage {
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiCompatProvider {
-    async fn propose_next_action(&self, params: &ProposalParams) -> Result<AgentProposal, LlmError> {
+    async fn propose_next_action(
+        &self,
+        params: &ProposalParams,
+    ) -> Result<AgentProposal, LlmError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -57,8 +60,11 @@ impl LlmProvider for OpenAiCompatProvider {
                 code: "CLIENT_INIT_FAILED".to_string(),
                 message: format!("Failed to create HTTP client: {}", e),
             })?;
-        
-        let system_prompt = super::build_system_prompt(&params.constraints, params.workspace_configured.unwrap_or(false));
+
+        let system_prompt = super::build_system_prompt(
+            &params.constraints,
+            params.workspace_configured.unwrap_or(false),
+        );
         let user_prompt = super::build_user_prompt(
             &params.goal,
             params.screenshot_png_base64.as_deref(),
@@ -69,18 +75,21 @@ impl LlmProvider for OpenAiCompatProvider {
         // Build messages
         let mut messages = vec![OpenAiCompatMessage {
             role: "system".to_string(),
-            content: vec![OpenAiCompatContent::Text { text: system_prompt }],
+            content: vec![OpenAiCompatContent::Text {
+                text: system_prompt,
+            }],
         }];
 
         // Add user message with text and optionally image
         let mut user_content = vec![OpenAiCompatContent::Text { text: user_prompt }];
-        
+
         // If we have a screenshot, add it as an image
         if let Some(screenshot_b64) = &params.screenshot_png_base64 {
             // Ensure the base64 doesn't include data URI prefix
-            let clean_b64 = screenshot_b64.strip_prefix("data:image/png;base64,")
+            let clean_b64 = screenshot_b64
+                .strip_prefix("data:image/png;base64,")
                 .unwrap_or(screenshot_b64);
-            
+
             user_content.push(OpenAiCompatContent::ImageUrl {
                 image_url: ImageUrl {
                     url: format!("data:image/png;base64,{}", clean_b64),
@@ -100,15 +109,14 @@ impl LlmProvider for OpenAiCompatProvider {
         };
 
         let url = super::build_openai_chat_completions_url(&params.base_url);
-        
-        let mut request_builder = client
-            .post(&url)
-            .header("Content-Type", "application/json");
-        
+
+        let mut request_builder = client.post(&url).header("Content-Type", "application/json");
+
         // Only add Authorization header if API key is provided and non-empty
         // For local servers, the key is typically not required
         if !params.api_key.is_empty() {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", params.api_key));
+            request_builder =
+                request_builder.header("Authorization", format!("Bearer {}", params.api_key));
         }
 
         let response = request_builder
@@ -132,7 +140,7 @@ impl LlmProvider for OpenAiCompatProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            
+
             // Provide helpful error messages for common issues
             let message = if status.as_u16() == 404 {
                 format!("Local server returned 404. Ensure the server supports OpenAI-compatible endpoints at /v1/chat/completions. Error: {}", text)
@@ -141,17 +149,18 @@ impl LlmProvider for OpenAiCompatProvider {
             } else {
                 format!("Local server error {}: {}", status, text)
             };
-            
+
             return Err(LlmError {
                 code: "API_ERROR".to_string(),
                 message,
             });
         }
 
-        let compat_response: OpenAiCompatResponse = response.json().await.map_err(|e| LlmError {
-            code: "PARSE_ERROR".to_string(),
-            message: format!("Failed to parse response from local server: {}", e),
-        })?;
+        let compat_response: OpenAiCompatResponse =
+            response.json().await.map_err(|e| LlmError {
+                code: "PARSE_ERROR".to_string(),
+                message: format!("Failed to parse response from local server: {}", e),
+            })?;
 
         let content = compat_response
             .choices
@@ -191,6 +200,7 @@ impl LlmProvider for OpenAiCompatProvider {
 }
 
 /// Create a fallback "ask_user" proposal when the local server is unreachable
+#[allow(dead_code)]
 pub fn create_server_unreachable_proposal() -> AgentProposal {
     AgentProposal::AskUser {
         question: "Unable to connect to the local LLM server. Please ensure your local model is running and try again. If you haven't set up a local model yet, check the documentation for instructions on running Qwen or another OpenAI-compatible model locally.".to_string(),

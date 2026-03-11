@@ -72,7 +72,8 @@ impl DemonstrationRecorder {
             return Err(RecorderError::AlreadyRecording);
         }
 
-        let id = format!("demo_{}_{}", 
+        let id = format!(
+            "demo_{}_{}",
             sanitize_filename(goal),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -103,7 +104,11 @@ impl DemonstrationRecorder {
     }
 
     /// Record a step
-    pub fn record_step(&self, action_type: &str, action_summary: &str) -> Result<(), RecorderError> {
+    pub fn record_step(
+        &self,
+        action_type: &str,
+        action_summary: &str,
+    ) -> Result<(), RecorderError> {
         let mut current = self.current.lock().map_err(|_| RecorderError::LockError)?;
 
         let demo = current.as_mut().ok_or(RecorderError::NotRecording)?;
@@ -128,18 +133,17 @@ impl DemonstrationRecorder {
     /// Stop recording and save
     pub fn stop(&self) -> Result<Demonstration, RecorderError> {
         let mut current = self.current.lock().map_err(|_| RecorderError::LockError)?;
-        
+
         let demo = current.take().ok_or(RecorderError::NotRecording)?;
 
         // Save to file
         let filename = format!("{}.json", demo.id);
         let filepath = self.data_dir.join(&filename);
-        
+
         let json = serde_json::to_string_pretty(&demo)
             .map_err(|e| RecorderError::SerializeError(e.to_string()))?;
-        
-        fs::write(&filepath, json)
-            .map_err(|e| RecorderError::IoError(e.to_string()))?;
+
+        fs::write(&filepath, json).map_err(|e| RecorderError::IoError(e.to_string()))?;
 
         Ok(demo)
     }
@@ -160,8 +164,8 @@ impl DemonstrationRecorder {
     pub fn list_demonstrations(&self) -> Result<Vec<DemonstrationSummary>, RecorderError> {
         let mut demos = vec![];
 
-        let entries = fs::read_dir(&self.data_dir)
-            .map_err(|e| RecorderError::IoError(e.to_string()))?;
+        let entries =
+            fs::read_dir(&self.data_dir).map_err(|e| RecorderError::IoError(e.to_string()))?;
 
         for entry in entries.flatten() {
             let path = entry.path();

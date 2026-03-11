@@ -34,6 +34,7 @@ pub enum MouseButton {
 
 impl Action {
     /// Get action type as string
+    #[allow(dead_code)]
     pub fn action_type(&self) -> String {
         match self {
             Action::Wait { .. } => "wait".to_string(),
@@ -69,6 +70,7 @@ impl Action {
     }
 
     /// Check if this is a privileged action requiring approval
+    #[allow(dead_code)]
     pub fn is_privileged(&self) -> bool {
         match self {
             Action::Wait { .. } => false,
@@ -83,6 +85,7 @@ impl Action {
     }
 
     /// Check if this action is safe to repeat without approval
+    #[allow(dead_code)]
     pub fn is_repeatable_safe(&self) -> bool {
         match self {
             // Scroll and wait are generally safe to repeat
@@ -116,27 +119,25 @@ impl ActionExecutor {
                     MouseButton::Middle => "middle",
                 };
                 // Call into Tauri command
-                let result = crate::input_click(x, y, button_str.to_string())
+                crate::input_click(x, y, button_str.to_string())
                     .map_err(|e| ExecuteError::InputError(e.message))?;
                 Ok(ActionResult::Success)
             }
             Action::DoubleClick { x, y } => {
-                let result = crate::input_double_click(x, y, "left".to_string())
+                crate::input_double_click(x, y, "left".to_string())
                     .map_err(|e| ExecuteError::InputError(e.message))?;
                 Ok(ActionResult::Success)
             }
             Action::Scroll { dx, dy } => {
-                let result = crate::input_scroll(dx, dy)
-                    .map_err(|e| ExecuteError::InputError(e.message))?;
+                crate::input_scroll(dx, dy).map_err(|e| ExecuteError::InputError(e.message))?;
                 Ok(ActionResult::Success)
             }
             Action::Type { text } => {
-                let result = crate::input_type(text)
-                    .map_err(|e| ExecuteError::InputError(e.message))?;
+                crate::input_type(text).map_err(|e| ExecuteError::InputError(e.message))?;
                 Ok(ActionResult::Success)
             }
             Action::Hotkey { key, modifiers } => {
-                let result = crate::input_hotkey(key, modifiers)
+                crate::input_hotkey(key, modifiers)
                     .map_err(|e| ExecuteError::InputError(e.message))?;
                 Ok(ActionResult::Success)
             }
@@ -155,6 +156,8 @@ impl ActionExecutor {
                         .args(&["/C", "start", "", &app_name])
                         .spawn();
                 }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                let _ = &app_name;
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 Ok(ActionResult::Success)
             }
@@ -179,8 +182,4 @@ pub enum ActionResult {
 pub enum ExecuteError {
     #[error("Input error: {0}")]
     InputError(String),
-    #[error("System error: {0}")]
-    SystemError(String),
-    #[error("Permission denied: {0}")]
-    PermissionDenied(String),
 }

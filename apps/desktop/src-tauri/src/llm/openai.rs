@@ -49,10 +49,16 @@ struct OpenAiResponseMessage {
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
-    async fn propose_next_action(&self, params: &ProposalParams) -> Result<AgentProposal, LlmError> {
+    async fn propose_next_action(
+        &self,
+        params: &ProposalParams,
+    ) -> Result<AgentProposal, LlmError> {
         let client = Client::new();
-        
-        let system_prompt = super::build_system_prompt(&params.constraints, params.workspace_configured.unwrap_or(false));
+
+        let system_prompt = super::build_system_prompt(
+            &params.constraints,
+            params.workspace_configured.unwrap_or(false),
+        );
         let user_prompt = super::build_user_prompt(
             &params.goal,
             params.screenshot_png_base64.as_deref(),
@@ -63,18 +69,21 @@ impl LlmProvider for OpenAiProvider {
         // Build messages
         let mut messages = vec![OpenAiMessage {
             role: "system".to_string(),
-            content: vec![OpenAiContent::Text { text: system_prompt }],
+            content: vec![OpenAiContent::Text {
+                text: system_prompt,
+            }],
         }];
 
         // Add user message with text and optionally image
         let mut user_content = vec![OpenAiContent::Text { text: user_prompt }];
-        
+
         // If we have a screenshot, add it as an image
         if let Some(screenshot_b64) = &params.screenshot_png_base64 {
             // Ensure the base64 doesn't include data URI prefix
-            let clean_b64 = screenshot_b64.strip_prefix("data:image/png;base64,")
+            let clean_b64 = screenshot_b64
+                .strip_prefix("data:image/png;base64,")
                 .unwrap_or(screenshot_b64);
-            
+
             user_content.push(OpenAiContent::ImageUrl {
                 image_url: ImageUrl {
                     url: format!("data:image/png;base64,{}", clean_b64),

@@ -63,20 +63,25 @@ impl ScreenObservation {
     pub fn find_element(&self, label: &str) -> Option<&UiElement> {
         let label_lower = label.to_lowercase();
         self.ui_elements.iter().find(|e| {
-            e.label.as_ref().map(|l| l.to_lowercase().contains(&label_lower)).unwrap_or(false)
+            e.label
+                .as_ref()
+                .map(|l| l.to_lowercase().contains(&label_lower))
+                .unwrap_or(false)
         })
     }
 
     /// Find all buttons
     pub fn find_buttons(&self) -> Vec<&UiElement> {
-        self.ui_elements.iter()
+        self.ui_elements
+            .iter()
             .filter(|e| matches!(e.element_type, UiElementType::Button) && e.interactable)
             .collect()
     }
 
     /// Find all inputs
     pub fn find_inputs(&self) -> Vec<&UiElement> {
-        self.ui_elements.iter()
+        self.ui_elements
+            .iter()
             .filter(|e| matches!(e.element_type, UiElementType::Input) && e.interactable)
             .collect()
     }
@@ -98,8 +103,11 @@ impl VisionEngine {
         let screenshot = self.capture_screenshot().await?;
 
         // 2. Get provider
-        let provider = self.provider_router.get_default_provider().await
-            .ok_or_else(|| VisionError::NoProviderAvailable)?;
+        let provider = self
+            .provider_router
+            .get_default_provider()
+            .await
+            .ok_or(VisionError::NoProviderAvailable)?;
 
         // 3. Analyze with LLM
         let request = super::providers::ScreenAnalysisRequest {
@@ -108,22 +116,31 @@ impl VisionEngine {
             previous_actions: vec![],
         };
 
-        let response = provider.analyze_screen(request).await
+        let response = provider
+            .analyze_screen(request)
+            .await
             .map_err(|e| VisionError::AnalysisError(e.message))?;
 
         // 4. Parse response
-        let observation: ScreenObservation = serde_json::from_str(&response)
-            .map_err(|e| VisionError::ParseError(e.to_string()))?;
+        let observation: ScreenObservation =
+            serde_json::from_str(&response).map_err(|e| VisionError::ParseError(e.to_string()))?;
 
         Ok(observation)
     }
 
     /// Observe with specific goal context
-    pub async fn observe_for_goal(&self, goal: &str, previous_actions: Vec<String>) -> Result<ScreenObservation, VisionError> {
+    pub async fn observe_for_goal(
+        &self,
+        goal: &str,
+        previous_actions: Vec<String>,
+    ) -> Result<ScreenObservation, VisionError> {
         let screenshot = self.capture_screenshot().await?;
 
-        let provider = self.provider_router.get_default_provider().await
-            .ok_or_else(|| VisionError::NoProviderAvailable)?;
+        let provider = self
+            .provider_router
+            .get_default_provider()
+            .await
+            .ok_or(VisionError::NoProviderAvailable)?;
 
         let request = super::providers::ScreenAnalysisRequest {
             screenshot_base64: screenshot,
@@ -131,11 +148,13 @@ impl VisionEngine {
             previous_actions,
         };
 
-        let response = provider.analyze_screen(request).await
+        let response = provider
+            .analyze_screen(request)
+            .await
             .map_err(|e| VisionError::AnalysisError(e.message))?;
 
-        let observation: ScreenObservation = serde_json::from_str(&response)
-            .map_err(|e| VisionError::ParseError(e.to_string()))?;
+        let observation: ScreenObservation =
+            serde_json::from_str(&response).map_err(|e| VisionError::ParseError(e.to_string()))?;
 
         Ok(observation)
     }
@@ -145,7 +164,7 @@ impl VisionEngine {
         // Use the existing Tauri command
         let result = crate::capture_display_png("display-0".to_string(), Some(1280))
             .map_err(|e| VisionError::CaptureError(e.message))?;
-        
+
         Ok(result.png_base64)
     }
 }
@@ -192,14 +211,15 @@ pub mod omniparser {
         /// Parse screenshot with OmniParser
         pub async fn parse(&self, screenshot_base64: &str) -> Result<Vec<UiElement>, String> {
             let url = format!("{}/parse", self.endpoint);
-            
+
             let request_body = serde_json::json!({
                 "image": screenshot_base64,
                 "box_threshold": 0.05,
                 "iou_threshold": 0.1,
             });
 
-            let response = self.client
+            let response = self
+                .client
                 .post(&url)
                 .json(&request_body)
                 .send()
@@ -210,7 +230,9 @@ pub mod omniparser {
                 return Err(format!("OmniParser returned error: {}", response.status()));
             }
 
-            let result: serde_json::Value = response.json().await
+            let result: serde_json::Value = response
+                .json()
+                .await
                 .map_err(|e| format!("Failed to parse response: {}", e))?;
 
             // Convert OmniParser output to UiElement format
@@ -218,13 +240,12 @@ pub mod omniparser {
                 .as_array()
                 .map(|arr| {
                     arr.iter()
-                        .enumerate()
-                        .filter_map(|(idx, item)| {
+                        .filter_map(|item| {
                             let bbox = item["bbox"].as_array()?;
                             if bbox.len() < 4 {
                                 return None;
                             }
-                            
+
                             let x1 = bbox[0].as_f64()?;
                             let y1 = bbox[1].as_f64()?;
                             let x2 = bbox[2].as_f64()?;
@@ -240,7 +261,9 @@ pub mod omniparser {
                             };
 
                             Some(UiElement {
-                                label: item["text"].as_str().map(|s| s.to_string())
+                                label: item["text"]
+                                    .as_str()
+                                    .map(|s| s.to_string())
                                     .or_else(|| item["content"].as_str().map(|s| s.to_string())),
                                 element_type,
                                 bounds: Some(Bounds {

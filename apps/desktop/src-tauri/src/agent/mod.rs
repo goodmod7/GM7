@@ -5,7 +5,9 @@
 pub mod executor;
 pub mod planner;
 pub mod providers;
+#[allow(dead_code)]
 pub mod recorder;
+#[allow(dead_code)]
 pub mod vision;
 
 use crate::llm::{
@@ -23,22 +25,17 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 
 pub use executor::{ActionExecutor, ExecuteError};
 pub use planner::{PlanStep, StepStatus, TaskPlan};
-pub use providers::{ProviderCapabilities, ProviderRouter, ProviderType};
-pub use vision::{ScreenObservation, VisionEngine, VisionError};
+pub use providers::{ProviderRouter, ProviderType};
+pub use vision::ScreenObservation;
 
 /// Safety level for the agent
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SafetyLevel {
     /// Approve every privileged action
+    #[default]
     Strict,
     /// Approve sensitive actions, allow low-risk verified repeated actions
     Balanced,
-}
-
-impl Default for SafetyLevel {
-    fn default() -> Self {
-        SafetyLevel::Strict
-    }
 }
 
 /// Configuration for the advanced agent
@@ -91,7 +88,10 @@ pub enum AgentTaskStatus {
     /// Planning the task
     Planning,
     /// Executing steps
-    Executing { current_step: usize, total_steps: usize },
+    Executing {
+        current_step: usize,
+        total_steps: usize,
+    },
     /// Awaiting user approval for an action
     AwaitingApproval { step_id: String },
     /// Awaiting user response to a question
@@ -153,7 +153,11 @@ pub enum AgentEvent {
     /// Action approved
     ActionApproved { task_id: String, step_id: String },
     /// Action denied
-    ActionDenied { task_id: String, step_id: String, reason: String },
+    ActionDenied {
+        task_id: String,
+        step_id: String,
+        reason: String,
+    },
     /// Action executed
     ActionExecuted {
         task_id: String,
@@ -197,16 +201,12 @@ fn now() -> u64 {
 pub enum AgentError {
     #[error("Provider error: {0}")]
     Provider(String),
-    #[error("Planner error: {0}")]
-    Planner(String),
     #[error("Vision error: {0}")]
     Vision(String),
     #[error("Execute error: {0}")]
     Execute(#[from] ExecuteError),
     #[error("Approval error: {0}")]
     Approval(String),
-    #[error("Task not found: {0}")]
-    TaskNotFound(String),
     #[error("Cancelled")]
     Cancelled,
 }
@@ -220,11 +220,9 @@ enum ApprovalDecision {
 
 enum PendingInteraction {
     Approval {
-        step_id: String,
         sender: oneshot::Sender<ApprovalDecision>,
     },
     UserInput {
-        step_id: String,
         sender: oneshot::Sender<String>,
     },
 }
@@ -683,7 +681,10 @@ async fn execute_step(
                 }
             }
         }
-        NextOperation::Approval { proposal, execution } => {
+        NextOperation::Approval {
+            proposal,
+            execution,
+        } => {
             let (action_type, summary) = proposal_metadata(&proposal);
             (callback)(AgentEvent::ActionProposed {
                 task_id: task_id.to_string(),
@@ -701,7 +702,8 @@ async fn execute_step(
                 pending,
                 cancelled,
             )
-            .await? {
+            .await?
+            {
                 ApprovalDecision::Approved => {
                     (callback)(AgentEvent::ActionApproved {
                         task_id: task_id.to_string(),
@@ -779,10 +781,7 @@ async fn request_approval(
 
     {
         let mut guard = pending.lock().await;
-        *guard = Some(PendingInteraction::Approval {
-            step_id: step_id.to_string(),
-            sender,
-        });
+        *guard = Some(PendingInteraction::Approval { sender });
     }
 
     {
@@ -822,10 +821,7 @@ async fn request_user_input(
 
     {
         let mut guard = pending.lock().await;
-        *guard = Some(PendingInteraction::UserInput {
-            step_id: step_id.to_string(),
-            sender,
-        });
+        *guard = Some(PendingInteraction::UserInput { sender });
     }
 
     {
@@ -938,8 +934,9 @@ async fn execute_pending(
                 }
             }
         }
-        PendingExecution::Tool(tool_call) => workspace::tool_execute_for_agent(tool_call)
-            .map_err(AgentError::Approval),
+        PendingExecution::Tool(tool_call) => {
+            workspace::tool_execute_for_agent(tool_call).map_err(AgentError::Approval)
+        }
     }
 }
 
@@ -954,18 +951,16 @@ fn build_provider(config: &AgentConfig) -> Result<Box<dyn providers::LlmProvider
             config.provider_model.clone(),
         ))),
         ProviderType::OpenAi => Ok(Box::new(providers::OpenAiProvider::new(
-            config
-                .provider_api_key
-                .clone()
-                .ok_or_else(|| AgentError::Provider("OpenAI-compatible provider is missing an API key".to_string()))?,
+            config.provider_api_key.clone().ok_or_else(|| {
+                AgentError::Provider("OpenAI-compatible provider is missing an API key".to_string())
+            })?,
             config.provider_base_url.clone(),
             config.provider_model.clone(),
         ))),
         ProviderType::Claude => Ok(Box::new(providers::ClaudeProvider::new(
-            config
-                .provider_api_key
-                .clone()
-                .ok_or_else(|| AgentError::Provider("Claude provider is missing an API key".to_string()))?,
+            config.provider_api_key.clone().ok_or_else(|| {
+                AgentError::Provider("Claude provider is missing an API key".to_string())
+            })?,
             config.provider_model.clone(),
         ))),
     }
@@ -973,14 +968,12 @@ fn build_provider(config: &AgentConfig) -> Result<Box<dyn providers::LlmProvider
 
 fn proposal_metadata(proposal: &RetailAgentProposal) -> (String, String) {
     match proposal {
-        RetailAgentProposal::ProposeAction { action, .. } => (
-            "ui_action".to_string(),
-            summarize_retail_action(action),
-        ),
-        RetailAgentProposal::ProposeTool { tool_call, .. } => (
-            "tool".to_string(),
-            summarize_retail_tool(tool_call),
-        ),
+        RetailAgentProposal::ProposeAction { action, .. } => {
+            ("ui_action".to_string(), summarize_retail_action(action))
+        }
+        RetailAgentProposal::ProposeTool { tool_call, .. } => {
+            ("tool".to_string(), summarize_retail_tool(tool_call))
+        }
         RetailAgentProposal::AskUser { question } => (
             "ask_user".to_string(),
             format!("Question for user: {}", question),
@@ -1012,13 +1005,16 @@ fn summarize_retail_tool(tool_call: &RetailToolCall) -> String {
         RetailToolCall::FsReadText { path } => format!("Read {}", path),
         RetailToolCall::FsWriteText { path, .. } => format!("Write {}", path),
         RetailToolCall::FsApplyPatch { path, .. } => format!("Patch {}", path),
-        RetailToolCall::TerminalExec { .. } => "Run a terminal command in the workspace".to_string(),
+        RetailToolCall::TerminalExec { .. } => {
+            "Run a terminal command in the workspace".to_string()
+        }
     }
 }
 
 fn parse_next_operation(input: &str) -> Result<NextOperation, AgentError> {
-    let proposal: RawProposalEnvelope = serde_json::from_str(input)
-        .map_err(|error| AgentError::Provider(format!("Failed to parse proposed step: {}", error)))?;
+    let proposal: RawProposalEnvelope = serde_json::from_str(input).map_err(|error| {
+        AgentError::Provider(format!("Failed to parse proposed step: {}", error))
+    })?;
 
     match proposal.action_type.as_str() {
         "click" => {
@@ -1119,9 +1115,9 @@ fn parse_next_operation(input: &str) -> Result<NextOperation, AgentError> {
             })
         }
         "ask_user" => Ok(NextOperation::AskUser {
-            question: proposal
-                .question
-                .unwrap_or_else(|| "The assistant needs clarification before continuing.".to_string()),
+            question: proposal.question.unwrap_or_else(|| {
+                "The assistant needs clarification before continuing.".to_string()
+            }),
         }),
         "done" => Ok(NextOperation::Done {
             summary: proposal
@@ -1175,17 +1171,11 @@ fn retail_action_to_executor(action: &RetailInputAction) -> executor::Action {
             y: *y,
             button: mouse_button(button),
         },
-        RetailInputAction::DoubleClick { x, y, .. } => executor::Action::DoubleClick {
-            x: *x,
-            y: *y,
-        },
-        RetailInputAction::Scroll { dx, dy } => executor::Action::Scroll {
-            dx: *dx,
-            dy: *dy,
-        },
-        RetailInputAction::Type { text } => executor::Action::Type {
-            text: text.clone(),
-        },
+        RetailInputAction::DoubleClick { x, y, .. } => {
+            executor::Action::DoubleClick { x: *x, y: *y }
+        }
+        RetailInputAction::Scroll { dx, dy } => executor::Action::Scroll { dx: *dx, dy: *dy },
+        RetailInputAction::Type { text } => executor::Action::Type { text: text.clone() },
         RetailInputAction::Hotkey { key, modifiers } => executor::Action::Hotkey {
             key: key.clone(),
             modifiers: modifiers.clone().unwrap_or_default(),
@@ -1195,12 +1185,10 @@ fn retail_action_to_executor(action: &RetailInputAction) -> executor::Action {
 
 fn retail_tool_to_workspace(tool_call: &RetailToolCall) -> workspace::ToolCall {
     match tool_call {
-        RetailToolCall::FsList { path } => workspace::ToolCall::FsList {
-            path: path.clone(),
-        },
-        RetailToolCall::FsReadText { path } => workspace::ToolCall::FsReadText {
-            path: path.clone(),
-        },
+        RetailToolCall::FsList { path } => workspace::ToolCall::FsList { path: path.clone() },
+        RetailToolCall::FsReadText { path } => {
+            workspace::ToolCall::FsReadText { path: path.clone() }
+        }
         RetailToolCall::FsWriteText { path, content } => workspace::ToolCall::FsWriteText {
             path: path.clone(),
             content: content.clone(),

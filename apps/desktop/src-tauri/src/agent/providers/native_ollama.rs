@@ -25,7 +25,12 @@ impl NativeOllamaProvider {
     }
 
     /// Generate a response from Ollama
-    async fn generate(&self, system: &str, user: &str, image: Option<&str>) -> Result<LlmResponse, ProviderError> {
+    async fn generate(
+        &self,
+        system: &str,
+        user: &str,
+        image: Option<&str>,
+    ) -> Result<LlmResponse, ProviderError> {
         let url = format!("{}/api/generate", self.endpoint);
 
         let prompt = if system.is_empty() {
@@ -49,7 +54,8 @@ impl NativeOllamaProvider {
             request_body["images"] = json!([img_b64]);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .json(&request_body)
             .send()
@@ -76,9 +82,7 @@ impl NativeOllamaProvider {
             is_retryable: false,
         })?;
 
-        let content = result["response"].as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = result["response"].as_str().unwrap_or("").to_string();
 
         let prompt_tokens = result["prompt_eval_count"].as_u64().unwrap_or(0) as usize;
         let completion_tokens = result["eval_count"].as_u64().unwrap_or(0) as usize;
@@ -88,9 +92,7 @@ impl NativeOllamaProvider {
             input_tokens: prompt_tokens,
             output_tokens: completion_tokens,
             model: self.model.clone(),
-            finish_reason: result["done_reason"].as_str()
-                .unwrap_or("stop")
-                .to_string(),
+            finish_reason: result["done_reason"].as_str().unwrap_or("stop").to_string(),
         })
     }
 
@@ -150,7 +152,8 @@ Rules:
 - Use "ask_user" when you need clarification
 - Keep steps atomic (one action per step)"#;
 
-        let user = format!("Goal: {}\n\nContext: {}\n\nCreate a detailed plan:",
+        let user = format!(
+            "Goal: {}\n\nContext: {}\n\nCreate a detailed plan:",
             request.goal,
             request.context.as_deref().unwrap_or("None")
         );
@@ -159,7 +162,10 @@ Rules:
         Ok(response.content)
     }
 
-    async fn analyze_screen(&self, request: ScreenAnalysisRequest) -> Result<String, ProviderError> {
+    async fn analyze_screen(
+        &self,
+        request: ScreenAnalysisRequest,
+    ) -> Result<String, ProviderError> {
         let system = r#"You are a computer vision assistant. Analyze the screenshot and provide a structured observation.
 
 Output format: Return valid JSON with this structure:
@@ -185,11 +191,12 @@ Guidelines:
 
         let user = format!(
             "Goal: {}\n\nPrevious actions: {:?}\n\nAnalyze this screenshot:",
-            request.goal,
-            request.previous_actions
+            request.goal, request.previous_actions
         );
 
-        let response = self.generate(system, &user, Some(&request.screenshot_base64)).await?;
+        let response = self
+            .generate(system, &user, Some(&request.screenshot_base64))
+            .await?;
         Ok(response.content)
     }
 
@@ -234,9 +241,7 @@ Guidelines:
 
         let user = format!(
             "Goal: {}\n\nStep: {}\n\nScreen observation: {}\n\nWhat should I do next?",
-            request.goal,
-            request.step_description,
-            request.observation
+            request.goal, request.step_description, request.observation
         );
 
         let response = self.generate(system, &user, None).await?;

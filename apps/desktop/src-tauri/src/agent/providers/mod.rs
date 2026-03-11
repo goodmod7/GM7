@@ -5,15 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-pub mod native_ollama;
-pub mod openai;
 pub mod claude;
 pub mod local_compat;
+pub mod native_ollama;
+pub mod openai;
 
-pub use native_ollama::NativeOllamaProvider;
-pub use openai::OpenAiProvider;
 pub use claude::ClaudeProvider;
 pub use local_compat::LocalCompatProvider;
+pub use native_ollama::NativeOllamaProvider;
+pub use openai::OpenAiProvider;
 
 /// Provider types supported by the agent
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,7 +40,10 @@ impl ProviderType {
     }
 
     pub fn is_free(&self) -> bool {
-        matches!(self, ProviderType::NativeQwenOllama | ProviderType::LocalOpenAiCompat)
+        matches!(
+            self,
+            ProviderType::NativeQwenOllama | ProviderType::LocalOpenAiCompat
+        )
     }
 
     pub fn is_cloud(&self) -> bool {
@@ -97,6 +100,7 @@ pub struct LlmResponse {
 }
 
 /// Cost estimate for a request
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostEstimate {
     pub estimated_input_tokens: usize,
@@ -124,7 +128,8 @@ pub trait LlmProvider: Send + Sync {
     async fn plan_task(&self, request: PlanRequest) -> Result<String, ProviderError>;
 
     /// Analyze a screen
-    async fn analyze_screen(&self, request: ScreenAnalysisRequest) -> Result<String, ProviderError>;
+    async fn analyze_screen(&self, request: ScreenAnalysisRequest)
+        -> Result<String, ProviderError>;
 
     /// Propose next action
     async fn propose_next_step(&self, request: ActionRequest) -> Result<String, ProviderError>;
@@ -210,8 +215,8 @@ impl ProviderRouter {
     }
 
     /// Get a specific provider
-    pub async fn get_provider(&self, provider_type: ProviderType) -> Option<Box<dyn LlmProvider>> {
-        let providers = self.providers.read().await;
+    pub async fn get_provider(&self, _provider_type: ProviderType) -> Option<Box<dyn LlmProvider>> {
+        let _providers = self.providers.read().await;
         // In a real implementation, we'd need to handle this differently
         // since we can't clone Box<dyn Trait> easily
         None
@@ -267,7 +272,7 @@ impl ProviderRouter {
 
         // Try preferred or default
         let to_try = preferred.unwrap_or(prefs.default_provider);
-        
+
         if let Some(provider) = providers.get(&to_try) {
             if provider.is_available().await {
                 return Err(ProviderError {

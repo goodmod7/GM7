@@ -19,7 +19,10 @@ impl ClaudeProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for ClaudeProvider {
-    async fn propose_next_action(&self, params: &ProposalParams) -> Result<AgentProposal, LlmError> {
+    async fn propose_next_action(
+        &self,
+        params: &ProposalParams,
+    ) -> Result<AgentProposal, LlmError> {
         let system_prompt = super::build_system_prompt(
             &params.constraints,
             params.workspace_configured.unwrap_or(false),

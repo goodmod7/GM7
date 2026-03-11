@@ -122,7 +122,6 @@ struct LocalAiInstallMetadata {
 
 #[derive(Debug, Clone, Copy)]
 struct LocalAiTierRuntimePlan {
-    tier: LocalAiTier,
     default_model: &'static str,
     optional_vision_model: &'static str,
 }
@@ -168,8 +167,15 @@ pub async fn runtime_status(state: &LocalAiRuntimeState) -> Result<LocalAiRuntim
         runtime_running: running,
         external_service_detected,
         service_url: LOCAL_AI_SERVICE_URL.to_string(),
-        install_stage: derive_install_stage(progress.stage, runtime_present, running, metadata.as_ref()),
-        selected_tier: progress.selected_tier.or_else(|| metadata.as_ref().map(|value| value.selected_tier)),
+        install_stage: derive_install_stage(
+            progress.stage,
+            runtime_present,
+            running,
+            metadata.as_ref(),
+        ),
+        selected_tier: progress
+            .selected_tier
+            .or_else(|| metadata.as_ref().map(|value| value.selected_tier)),
         selected_model: progress
             .selected_model
             .clone()
@@ -210,8 +216,13 @@ pub async fn install_start(
 
     if let Some(metadata) = existing_metadata.as_ref() {
         if metadata.selected_tier == selected_tier
-            && metadata.installed_models.iter().any(|model| model == plan.default_model)
-            && (expected_runtime_binary_path(&managed_dir).as_ref().is_some_and(|path| path.exists())
+            && metadata
+                .installed_models
+                .iter()
+                .any(|model| model == plan.default_model)
+            && (expected_runtime_binary_path(&managed_dir)
+                .as_ref()
+                .is_some_and(|path| path.exists())
                 || is_service_port_open())
         {
             let ready_progress = LocalAiInstallProgress {
@@ -245,7 +256,10 @@ pub async fn install_start(
         progress_percent: Some(0),
         downloaded_bytes: None,
         total_bytes: None,
-        message: Some(format!("Preparing managed Free AI install for {}.", plan.default_model)),
+        message: Some(format!(
+            "Preparing managed Free AI install for {}.",
+            plan.default_model
+        )),
         updated_at_ms: unix_time_ms(),
     };
     set_install_progress(state, planned.clone());
@@ -262,7 +276,9 @@ pub async fn install_start(
                 LocalAiInstallProgress {
                     stage: LocalAiInstallStage::Error,
                     selected_tier: Some(selected_tier),
-                    selected_model: Some(tier_runtime_plan(selected_tier).default_model.to_string()),
+                    selected_model: Some(
+                        tier_runtime_plan(selected_tier).default_model.to_string(),
+                    ),
                     progress_percent: None,
                     downloaded_bytes: None,
                     total_bytes: None,
@@ -287,13 +303,16 @@ pub async fn enable_vision_boost(
         return Ok(install_progress(state));
     }
 
-    let metadata = read_metadata(&managed_dir).ok_or_else(|| {
-        "Set up Free AI first before enabling Vision Boost.".to_string()
-    })?;
+    let metadata = read_metadata(&managed_dir)
+        .ok_or_else(|| "Set up Free AI first before enabling Vision Boost.".to_string())?;
     let plan = tier_runtime_plan(metadata.selected_tier);
     let vision_model = plan.optional_vision_model;
 
-    if metadata.installed_models.iter().any(|model| model == vision_model) {
+    if metadata
+        .installed_models
+        .iter()
+        .any(|model| model == vision_model)
+    {
         let ready_progress = LocalAiInstallProgress {
             stage: if is_service_port_open() {
                 LocalAiInstallStage::Ready
@@ -335,8 +354,11 @@ pub async fn enable_vision_boost(
 
     let worker_state = state.clone();
     thread::spawn(move || {
-        let result =
-            run_enable_vision_boost_worker(worker_state.clone(), managed_dir, metadata.selected_tier);
+        let result = run_enable_vision_boost_worker(
+            worker_state.clone(),
+            managed_dir,
+            metadata.selected_tier,
+        );
         if let Err(error) = result {
             set_last_error(&worker_state, error.clone());
             set_install_progress(
@@ -484,7 +506,8 @@ pub fn recommend_tier(profile: &LocalAiHardwareProfile) -> LocalAiTierRecommenda
     let cpu_cores = profile.logical_cpu_cores;
     let discrete_gpu = matches!(profile.gpu_class, LocalAiGpuClass::Discrete);
     let apple_silicon = profile.os == "macos" && profile.architecture == "aarch64";
-    let vision_capable = (discrete_gpu || apple_silicon) && ram_gib >= 24 && disk_gib >= 35 && cpu_cores >= 8;
+    let vision_capable =
+        (discrete_gpu || apple_silicon) && ram_gib >= 24 && disk_gib >= 35 && cpu_cores >= 8;
     let standard_capable = ram_gib >= 14 && disk_gib >= 18 && cpu_cores >= 8;
 
     if vision_capable {
@@ -535,7 +558,8 @@ fn run_install_worker(
     );
 
     let runtime_binary = ensure_runtime_binary(&managed_dir)?;
-    let runtime_version = detect_runtime_version(&runtime_binary).unwrap_or_else(|| "ollama-unknown".to_string());
+    let runtime_version =
+        detect_runtime_version(&runtime_binary).unwrap_or_else(|| "ollama-unknown".to_string());
     let runtime_source = if read_metadata(&managed_dir).is_some() || runtime_binary.exists() {
         "managed_or_adopted_ollama".to_string()
     } else {
@@ -561,7 +585,12 @@ fn run_install_worker(
     let metadata_before = read_metadata(&managed_dir);
     let already_installed = metadata_before
         .as_ref()
-        .map(|value| value.installed_models.iter().any(|model| model == plan.default_model))
+        .map(|value| {
+            value
+                .installed_models
+                .iter()
+                .any(|model| model == plan.default_model)
+        })
         .unwrap_or(false);
 
     if !already_installed {
@@ -574,7 +603,10 @@ fn run_install_worker(
                 progress_percent: Some(65),
                 downloaded_bytes: None,
                 total_bytes: None,
-                message: Some(format!("Downloading the default free model {}...", plan.default_model)),
+                message: Some(format!(
+                    "Downloading the default free model {}...",
+                    plan.default_model
+                )),
                 updated_at_ms: unix_time_ms(),
             },
         );
@@ -690,10 +722,7 @@ fn run_enable_vision_boost_worker(
             progress_percent: Some(100),
             downloaded_bytes: None,
             total_bytes: None,
-            message: Some(format!(
-                "Vision Boost is ready with {}.",
-                vision_model
-            )),
+            message: Some(format!("Vision Boost is ready with {}.", vision_model)),
             updated_at_ms: unix_time_ms(),
         },
     );
@@ -704,17 +733,14 @@ fn run_enable_vision_boost_worker(
 fn tier_runtime_plan(tier: LocalAiTier) -> LocalAiTierRuntimePlan {
     match tier {
         LocalAiTier::Light => LocalAiTierRuntimePlan {
-            tier,
             default_model: "qwen2.5:1.5b",
             optional_vision_model: "qwen2.5-vl:3b",
         },
         LocalAiTier::Standard => LocalAiTierRuntimePlan {
-            tier,
             default_model: "qwen2.5:3b",
             optional_vision_model: "qwen2.5-vl:3b",
         },
         LocalAiTier::Vision => LocalAiTierRuntimePlan {
-            tier,
             default_model: "qwen2.5-vl:3b",
             optional_vision_model: "qwen2.5-vl:3b",
         },
@@ -803,7 +829,13 @@ fn ensure_runtime_binary(managed_dir: &Path) -> Result<PathBuf, String> {
     #[cfg(unix)]
     {
         let mut permissions = fs::metadata(&path)
-            .map_err(|error| format!("Failed to read runtime metadata {}: {}", path.display(), error))?
+            .map_err(|error| {
+                format!(
+                    "Failed to read runtime metadata {}: {}",
+                    path.display(),
+                    error
+                )
+            })?
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).map_err(|error| {
@@ -842,7 +874,11 @@ fn find_system_ollama_binary() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Some(program_files) = env::var_os("ProgramFiles") {
-            candidates.push(PathBuf::from(program_files).join("Ollama").join("ollama.exe"));
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("Ollama")
+                    .join("ollama.exe"),
+            );
         }
         if let Some(local_app_data) = env::var_os("LocalAppData") {
             candidates.push(
@@ -1180,7 +1216,8 @@ fn detect_available_disk_bytes(path: &Path) -> Option<u64> {
             "(Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='{}'\").FreeSpace",
             root.trim_end_matches('\\')
         );
-        if let Some(value) = run_command_capture("powershell", &["-NoProfile", "-Command", &query]) {
+        if let Some(value) = run_command_capture("powershell", &["-NoProfile", "-Command", &query])
+        {
             if let Ok(bytes) = value.parse::<u64>() {
                 return Some(bytes);
             }
@@ -1193,7 +1230,10 @@ fn detect_available_disk_bytes(path: &Path) -> Option<u64> {
 fn detect_gpu_summary() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        if let Some(value) = run_command_capture("sh", &["-lc", "lspci | grep -Ei 'vga|3d|display' | head -n 1"]) {
+        if let Some(value) = run_command_capture(
+            "sh",
+            &["-lc", "lspci | grep -Ei 'vga|3d|display' | head -n 1"],
+        ) {
             if !value.is_empty() {
                 return Some(value);
             }
@@ -1236,7 +1276,9 @@ fn detect_gpu_summary() -> Option<String> {
 }
 
 fn detect_gpu_class() -> LocalAiGpuClass {
-    let summary = detect_gpu_summary().unwrap_or_default().to_ascii_lowercase();
+    let summary = detect_gpu_summary()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if summary.is_empty() {
         return LocalAiGpuClass::Unknown;
     }

@@ -33,9 +33,7 @@ impl OpenAiProvider {
     ) -> Result<LlmResponse, ProviderError> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        let mut messages = vec![
-            json!({"role": "system", "content": system}),
-        ];
+        let mut messages = vec![json!({"role": "system", "content": system})];
 
         // Build user message
         let user_message = if let Some(img_b64) = image {
@@ -130,10 +128,9 @@ impl LlmProvider for OpenAiProvider {
 
     async fn is_available(&self) -> bool {
         // Test with a simple request
-        match self.chat_completion("You are a test.", "Say 'ok' only.", None).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        self.chat_completion("You are a test.", "Say 'ok' only.", None)
+            .await
+            .is_ok()
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -171,7 +168,10 @@ Rules:
         Ok(response.content)
     }
 
-    async fn analyze_screen(&self, request: ScreenAnalysisRequest) -> Result<String, ProviderError> {
+    async fn analyze_screen(
+        &self,
+        request: ScreenAnalysisRequest,
+    ) -> Result<String, ProviderError> {
         if !self.capabilities().supports_vision {
             return Err(ProviderError {
                 code: "VISION_NOT_SUPPORTED".to_string(),
@@ -199,8 +199,7 @@ Output format: Return valid JSON with this structure:
 
         let user = format!(
             "Goal: {}\n\nPrevious actions: {:?}\n\nAnalyze this screenshot:",
-            request.goal,
-            request.previous_actions
+            request.goal, request.previous_actions
         );
 
         let response = self

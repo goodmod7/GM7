@@ -27,34 +27,40 @@ pub struct ConfigureResult {
 #[tauri::command]
 pub fn workspace_configure(path: String) -> ConfigureResult {
     let path_buf = PathBuf::from(&path);
-    
+
     // Validate path exists and is a directory
     if !path_buf.exists() {
         return ConfigureResult {
             ok: false,
             error: Some(format!("Path does not exist: {}", path)),
-            state: WorkspaceState { configured: false, root_name: None },
+            state: WorkspaceState {
+                configured: false,
+                root_name: None,
+            },
         };
     }
-    
+
     if !path_buf.is_dir() {
         return ConfigureResult {
             ok: false,
             error: Some(format!("Path is not a directory: {}", path)),
-            state: WorkspaceState { configured: false, root_name: None },
+            state: WorkspaceState {
+                configured: false,
+                root_name: None,
+            },
         };
     }
-    
+
     // Get the root name (last component of path)
     let root_name = path_buf
         .file_name()
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
-    
+
     // Store the workspace root
     let mut guard = WORKSPACE_ROOT.lock().unwrap();
     *guard = Some(path_buf);
-    
+
     ConfigureResult {
         ok: true,
         error: None,
@@ -68,14 +74,14 @@ pub fn workspace_configure(path: String) -> ConfigureResult {
 #[tauri::command]
 pub fn workspace_get_state() -> WorkspaceState {
     let guard = WORKSPACE_ROOT.lock().unwrap();
-    
+
     match guard.as_ref() {
         Some(path) => {
             let root_name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .map(|s| s.to_string());
-            
+
             WorkspaceState {
                 configured: true,
                 root_name,
@@ -108,7 +114,7 @@ pub async fn workspace_select_directory(app: tauri::AppHandle) -> Result<Option<
 pub fn workspace_clear() -> WorkspaceState {
     let mut guard = WORKSPACE_ROOT.lock().unwrap();
     *guard = None;
-    
+
     WorkspaceState {
         configured: false,
         root_name: None,
@@ -131,7 +137,11 @@ pub enum ToolCall {
     #[serde(rename = "fs.apply_patch")]
     FsApplyPatch { path: String, patch: String },
     #[serde(rename = "terminal.exec")]
-    TerminalExec { cmd: String, args: Vec<String>, cwd: Option<String> },
+    TerminalExec {
+        cmd: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
@@ -160,11 +170,27 @@ pub struct ToolError {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ToolResultData {
-    FsList { entries: Vec<FsListEntry>, truncated: bool },
-    FsReadText { content: String, truncated: bool },
-    FsWriteText { bytes_written: u64 },
-    FsApplyPatch { bytes_written: u64, hunks_applied: u32 },
-    TerminalExec { exit_code: i32, stdout_preview: String, stderr_preview: String, truncated: bool },
+    FsList {
+        entries: Vec<FsListEntry>,
+        truncated: bool,
+    },
+    FsReadText {
+        content: String,
+        truncated: bool,
+    },
+    FsWriteText {
+        bytes_written: u64,
+    },
+    FsApplyPatch {
+        bytes_written: u64,
+        hunks_applied: u32,
+    },
+    TerminalExec {
+        exit_code: i32,
+        stdout_preview: String,
+        stderr_preview: String,
+        truncated: bool,
+    },
 }
 
 const MAX_LIST_ENTRIES: usize = 1000;
@@ -175,15 +201,15 @@ const MAX_TRUNCATED_OUTPUT: usize = 10_000; // 10KB for preview
 /// Validate and resolve a relative path within the workspace
 fn resolve_workspace_path(rel_path: &str) -> Result<PathBuf, ToolError> {
     let guard = WORKSPACE_ROOT.lock().unwrap();
-    
+
     let root = guard.as_ref().ok_or(ToolError {
         code: "WORKSPACE_NOT_CONFIGURED".to_string(),
         message: "Workspace not configured".to_string(),
     })?;
-    
+
     // Normalize the path (resolve . and ..)
     let path = Path::new(rel_path);
-    
+
     // Prevent path traversal attacks - check for absolute paths and parent references
     if path.is_absolute() {
         return Err(ToolError {
@@ -191,10 +217,10 @@ fn resolve_workspace_path(rel_path: &str) -> Result<PathBuf, ToolError> {
             message: "Absolute paths not allowed".to_string(),
         });
     }
-    
+
     // Resolve against workspace root
     let resolved = root.join(path);
-    
+
     // Ensure the resolved path is within the workspace
     // Use canonicalize if the path exists, otherwise check components
     if resolved.exists() {
@@ -204,14 +230,14 @@ fn resolve_workspace_path(rel_path: &str) -> Result<PathBuf, ToolError> {
                     code: "INTERNAL_ERROR".to_string(),
                     message: format!("Failed to canonicalize root: {}", e),
                 })?;
-                
+
                 if !canonical.starts_with(&root_canonical) {
                     return Err(ToolError {
                         code: "PATH_OUTSIDE_WORKSPACE".to_string(),
                         message: "Path is outside workspace".to_string(),
                     });
                 }
-                
+
                 Ok(canonical)
             }
             Err(e) => Err(ToolError {
@@ -225,26 +251,27 @@ fn resolve_workspace_path(rel_path: &str) -> Result<PathBuf, ToolError> {
             code: "INVALID_PATH".to_string(),
             message: "Invalid path".to_string(),
         })?;
-        
+
         if !parent.starts_with(root) {
             return Err(ToolError {
                 code: "PATH_OUTSIDE_WORKSPACE".to_string(),
                 message: "Path is outside workspace".to_string(),
             });
         }
-        
+
         Ok(resolved)
     }
 }
 
+#[allow(dead_code)]
 fn make_relative_path(path: &Path) -> Result<String, ToolError> {
     let guard = WORKSPACE_ROOT.lock().unwrap();
-    
+
     let root = guard.as_ref().ok_or(ToolError {
         code: "WORKSPACE_NOT_CONFIGURED".to_string(),
         message: "Workspace not configured".to_string(),
     })?;
-    
+
     path.strip_prefix(root)
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|_| ToolError {
@@ -260,7 +287,9 @@ pub fn tool_execute(tool_call: ToolCall) -> ToolResult {
         ToolCall::FsReadText { path } => execute_fs_read_text(&path),
         ToolCall::FsWriteText { path, content } => execute_fs_write_text(&path, &content),
         ToolCall::FsApplyPatch { path, patch } => execute_fs_apply_patch(&path, &patch),
-        ToolCall::TerminalExec { cmd, args, cwd } => execute_terminal_exec(&cmd, &args, cwd.as_deref()),
+        ToolCall::TerminalExec { cmd, args, cwd } => {
+            execute_terminal_exec(&cmd, &args, cwd.as_deref())
+        }
     }
 }
 
@@ -280,9 +309,15 @@ pub fn tool_execute_for_agent(tool_call: ToolCall) -> Result<String, String> {
 fn execute_fs_list(path: &str) -> ToolResult {
     let resolved = match resolve_workspace_path(path) {
         Ok(p) => p,
-        Err(e) => return ToolResult { ok: false, error: Some(e), data: None },
+        Err(e) => {
+            return ToolResult {
+                ok: false,
+                error: Some(e),
+                data: None,
+            }
+        }
     };
-    
+
     if !resolved.is_dir() {
         return ToolResult {
             ok: false,
@@ -293,10 +328,10 @@ fn execute_fs_list(path: &str) -> ToolResult {
             data: None,
         };
     }
-    
+
     let mut entries = Vec::new();
     let mut truncated = false;
-    
+
     match std::fs::read_dir(&resolved) {
         Ok(dir) => {
             for entry in dir {
@@ -304,20 +339,20 @@ fn execute_fs_list(path: &str) -> ToolResult {
                     truncated = true;
                     break;
                 }
-                
+
                 match entry {
                     Ok(e) => {
                         let name = e.file_name().to_string_lossy().to_string();
                         let metadata = e.metadata().ok();
-                        
+
                         let kind = if metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
                             "dir".to_string()
                         } else {
                             "file".to_string()
                         };
-                        
+
                         let size = metadata.map(|m| m.len());
-                        
+
                         entries.push(FsListEntry { name, kind, size });
                     }
                     Err(_) => continue,
@@ -335,7 +370,7 @@ fn execute_fs_list(path: &str) -> ToolResult {
             }
         }
     }
-    
+
     ToolResult {
         ok: true,
         error: None,
@@ -346,9 +381,15 @@ fn execute_fs_list(path: &str) -> ToolResult {
 fn execute_fs_read_text(path: &str) -> ToolResult {
     let resolved = match resolve_workspace_path(path) {
         Ok(p) => p,
-        Err(e) => return ToolResult { ok: false, error: Some(e), data: None },
+        Err(e) => {
+            return ToolResult {
+                ok: false,
+                error: Some(e),
+                data: None,
+            }
+        }
     };
-    
+
     if !resolved.is_file() {
         return ToolResult {
             ok: false,
@@ -359,7 +400,7 @@ fn execute_fs_read_text(path: &str) -> ToolResult {
             data: None,
         };
     }
-    
+
     // Check file size before reading
     let metadata = match std::fs::metadata(&resolved) {
         Ok(m) => m,
@@ -374,15 +415,15 @@ fn execute_fs_read_text(path: &str) -> ToolResult {
             }
         }
     };
-    
+
     let truncated = metadata.len() > MAX_READ_BYTES as u64;
-    
+
     // Read file (with size limit)
     let content = match std::fs::read(&resolved) {
         Ok(bytes) => {
             let limit = std::cmp::min(bytes.len(), MAX_READ_BYTES);
             let bytes_to_read = &bytes[..limit];
-            
+
             // Try to decode as UTF-8
             match String::from_utf8(bytes_to_read.to_vec()) {
                 Ok(s) => s,
@@ -409,7 +450,7 @@ fn execute_fs_read_text(path: &str) -> ToolResult {
             }
         }
     };
-    
+
     ToolResult {
         ok: true,
         error: None,
@@ -420,9 +461,15 @@ fn execute_fs_read_text(path: &str) -> ToolResult {
 fn execute_fs_write_text(path: &str, content: &str) -> ToolResult {
     let resolved = match resolve_workspace_path(path) {
         Ok(p) => p,
-        Err(e) => return ToolResult { ok: false, error: Some(e), data: None },
+        Err(e) => {
+            return ToolResult {
+                ok: false,
+                error: Some(e),
+                data: None,
+            }
+        }
     };
-    
+
     // Ensure parent directory exists
     if let Some(parent) = resolved.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -433,10 +480,10 @@ fn execute_fs_write_text(path: &str, content: &str) -> ToolResult {
                     message: format!("Failed to create parent directory: {}", e),
                 }),
                 data: None,
-            }
+            };
         }
     }
-    
+
     // Write file
     match std::fs::write(&resolved, content.as_bytes()) {
         Ok(()) => {
@@ -454,7 +501,7 @@ fn execute_fs_write_text(path: &str, content: &str) -> ToolResult {
                 message: format!("Failed to write file: {}", e),
             }),
             data: None,
-        }
+        },
     }
 }
 
@@ -462,9 +509,15 @@ fn execute_fs_apply_patch(path: &str, patch: &str) -> ToolResult {
     // First read the existing content
     let resolved = match resolve_workspace_path(path) {
         Ok(p) => p,
-        Err(e) => return ToolResult { ok: false, error: Some(e), data: None },
+        Err(e) => {
+            return ToolResult {
+                ok: false,
+                error: Some(e),
+                data: None,
+            }
+        }
     };
-    
+
     let existing = match std::fs::read_to_string(&resolved) {
         Ok(s) => s,
         Err(e) => {
@@ -478,7 +531,7 @@ fn execute_fs_apply_patch(path: &str, patch: &str) -> ToolResult {
             }
         }
     };
-    
+
     // Simple patch format: search/replace blocks
     // Format:
     // <<<<<<< SEARCH
@@ -486,25 +539,24 @@ fn execute_fs_apply_patch(path: &str, patch: &str) -> ToolResult {
     // =======
     // new content
     // >>>>>>> REPLACE
-    // 
+    //
     // Apply patches sequentially
     let mut content = existing;
     let mut hunks_applied = 0u32;
-    
-    let patch_regex = regex::Regex::new(
-        r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE"
-    ).unwrap();
-    
+
+    let patch_regex =
+        regex::Regex::new(r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE").unwrap();
+
     for cap in patch_regex.captures_iter(patch) {
         let search = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         let replace = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-        
+
         if content.contains(search) {
             content = content.replacen(search, replace, 1);
             hunks_applied += 1;
         }
     }
-    
+
     // Write the patched content
     match std::fs::write(&resolved, content.as_bytes()) {
         Ok(()) => {
@@ -512,7 +564,10 @@ fn execute_fs_apply_patch(path: &str, patch: &str) -> ToolResult {
             ToolResult {
                 ok: true,
                 error: None,
-                data: Some(ToolResultData::FsApplyPatch { bytes_written, hunks_applied }),
+                data: Some(ToolResultData::FsApplyPatch {
+                    bytes_written,
+                    hunks_applied,
+                }),
             }
         }
         Err(e) => ToolResult {
@@ -522,7 +577,7 @@ fn execute_fs_apply_patch(path: &str, patch: &str) -> ToolResult {
                 message: format!("Failed to write patched file: {}", e),
             }),
             data: None,
-        }
+        },
     }
 }
 
@@ -531,7 +586,13 @@ fn execute_terminal_exec(cmd: &str, args: &[String], cwd: Option<&str>) -> ToolR
     let cwd_path = match cwd {
         Some(c) => match resolve_workspace_path(c) {
             Ok(p) => Some(p),
-            Err(e) => return ToolResult { ok: false, error: Some(e), data: None },
+            Err(e) => {
+                return ToolResult {
+                    ok: false,
+                    error: Some(e),
+                    data: None,
+                }
+            }
         },
         None => {
             // Use workspace root as default
@@ -539,15 +600,15 @@ fn execute_terminal_exec(cmd: &str, args: &[String], cwd: Option<&str>) -> ToolR
             guard.clone()
         }
     };
-    
+
     // Build command
     let mut command = Command::new(cmd);
     command.args(args);
-    
+
     if let Some(ref cwd) = cwd_path {
         command.current_dir(cwd);
     }
-    
+
     // Execute with timeout (30 seconds)
     let output = match command.output() {
         Ok(o) => o,
@@ -562,28 +623,28 @@ fn execute_terminal_exec(cmd: &str, args: &[String], cwd: Option<&str>) -> ToolR
             }
         }
     };
-    
+
     let exit_code = output.status.code().unwrap_or(-1);
-    
+
     // Truncate output if too large
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     let total_len = stdout.len() + stderr.len();
     let truncated = total_len > MAX_TERMINAL_OUTPUT;
-    
+
     let stdout_preview = if stdout.len() > MAX_TRUNCATED_OUTPUT {
         format!("{}...(truncated)", &stdout[..MAX_TRUNCATED_OUTPUT])
     } else {
         stdout.to_string()
     };
-    
+
     let stderr_preview = if stderr.len() > MAX_TRUNCATED_OUTPUT {
         format!("{}...(truncated)", &stderr[..MAX_TRUNCATED_OUTPUT])
     } else {
         stderr.to_string()
     };
-    
+
     ToolResult {
         ok: true,
         error: None,
@@ -597,6 +658,7 @@ fn execute_terminal_exec(cmd: &str, args: &[String], cwd: Option<&str>) -> ToolR
 }
 
 /// Get the tool name for a tool call (for logging/summary)
+#[allow(dead_code)]
 pub fn get_tool_name(tool: &ToolCall) -> &'static str {
     match tool {
         ToolCall::FsList { .. } => "fs.list",
@@ -608,6 +670,7 @@ pub fn get_tool_name(tool: &ToolCall) -> &'static str {
 }
 
 /// Get the target path/command for a tool call (for logging/summary)
+#[allow(dead_code)]
 pub fn get_tool_target(tool: &ToolCall) -> String {
     match tool {
         ToolCall::FsList { path } => path.clone(),

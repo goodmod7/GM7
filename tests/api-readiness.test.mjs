@@ -58,3 +58,29 @@ test('readiness reports concrete failures when DB probing fails or provider conf
   assert.match(readiness.failures.join(' | '), /stripe/i);
   assert.match(readiness.failures.join(' | '), /github/i);
 });
+
+test('readiness fails when GitHub desktop release metadata cannot be resolved', async () => {
+  const { evaluateReadiness } = await import('../apps/api/src/lib/readiness.ts');
+
+  const readiness = await evaluateReadiness({
+    billingEnabled: false,
+    desktopReleaseSource: 'github',
+    stripe: {
+      secretKeyConfigured: false,
+      webhookSecretConfigured: false,
+      priceIdConfigured: false,
+    },
+    github: {
+      repoConfigured: true,
+    },
+    checkGitHubRelease: async () => {
+      throw new Error('release not found');
+    },
+    checkDatabase: async () => {},
+    checkSchema: async () => {},
+  });
+
+  assert.equal(readiness.ok, false);
+  assert.equal(readiness.checks.github, false);
+  assert.match(readiness.failures.join(' | '), /desktop release/i);
+});

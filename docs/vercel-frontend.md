@@ -15,6 +15,8 @@ No `vercel.json` is required for the current deployment shape.
 
 - `NEXT_PUBLIC_API_BASE=https://api.<your-domain>`
 
+The backend must allow this frontend origin through `WEB_ORIGIN`, otherwise browser fetches fail before your page can read the API response.
+
 Example:
 
 ```bash
@@ -64,6 +66,8 @@ The current auth model stays unchanged:
 - secure cookies in production
 
 If you rely on a split provider-default topology such as `*.vercel.app` + `*.onrender.com`, initial testing can still work, but cookie and CSRF debugging tends to be more awkward than with a shared parent domain.
+
+For that bring-up shape, make sure Render `WEB_ORIGIN` includes the exact deployed Vercel hostname, for example `https://gm7-tau.vercel.app`.
 
 ## Build and Deployment Notes
 

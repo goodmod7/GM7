@@ -77,7 +77,7 @@ REST endpoints:
 - `POST /billing/portal` - Open Stripe Customer Portal
 - `POST /billing/webhook` - Stripe webhook receiver
 - `GET /` - Service index with health/readiness links
-- `GET /downloads/desktop` - Subscription-gated desktop installer metadata
+- `GET /downloads/desktop` - Public desktop installer metadata
 - `GET /updates/desktop/:platform/:arch/:currentVersion.json` - Desktop updater manifest feed (stubbed in dev)
 - `GET /health` - Liveness endpoint (process up, no DB check)
 - `GET /ready` - Readiness endpoint (DB + schema + environment checks)
@@ -110,7 +110,7 @@ Navigate to `/dashboard` to:
 - Cancel active runs
 - **View screen preview** (Iteration 4) - click "View Screen" on a device with streaming enabled
 
-The `/download` page is subscription-gated. It reads release metadata from the API. In `DESKTOP_RELEASE_SOURCE=file` mode, the API serves the Iteration 13 env-based URLs. In `DESKTOP_RELEASE_SOURCE=github` mode, it derives the latest stable version and installer links from GitHub Release assets by default. Beta releases stay on GitHub pre-release tags unless you explicitly pin `DESKTOP_RELEASE_TAG` to a beta tag.
+The `/download` page is public. It reads release metadata from the API. In `DESKTOP_RELEASE_SOURCE=file` mode, the API serves the Iteration 13 env-based URLs. In `DESKTOP_RELEASE_SOURCE=github` mode, it derives installer links from the configured GitHub Release, defaulting to `DESKTOP_RELEASE_TAG=latest`. You can pin `DESKTOP_RELEASE_TAG` to a beta tag for internal testing, but the tag must exist in GitHub Releases.
 
 ### Desktop App
 
@@ -132,7 +132,7 @@ pnpm --filter desktop tauri:dev
 
 Packaged production desktop builds must use `https://` for `VITE_API_HTTP_BASE` and `wss://` for `VITE_API_WS_URL`. `VITE_DESKTOP_ALLOW_INSECURE_LOCALHOST=true` exists only for local debug packaging and should not be used for real production distribution.
 
-Desktop auto-update is configured through the API updater feed at `/updates/desktop/...`. In `DESKTOP_RELEASE_SOURCE=file` mode, the API serves stub manifests from `apps/api/updates`. In `DESKTOP_RELEASE_SOURCE=github` mode, it builds the updater response dynamically from GitHub Release assets and `.sig` files. Stable auto-updates only promote signed releases; unsigned beta releases are kept off the default updater path.
+Desktop auto-update is configured through the API updater feed at `/updates/desktop/...`. In `DESKTOP_RELEASE_SOURCE=file` mode, the API serves stub manifests from `apps/api/updates`. In `DESKTOP_RELEASE_SOURCE=github` mode, it builds the updater response dynamically from GitHub Release assets and `.sig` files. Public downloads only need installer assets, but the updater feed still requires signed releases.
 
 The desktop app now runs as an always-on tray agent. Closing the window hides it to the system tray instead of exiting. Use the tray menu to show the app again or choose `Quit` to fully exit. Screen preview and remote control remain opt-in and can be toggled from the tray or the desktop UI.
 

@@ -26,7 +26,7 @@ import { usersRepo } from './repos/users.js';
 import { stripeEventsRepo } from './repos/stripe-events.js';
 import { ownership } from './lib/ownership.js';
 import { fetchDesktopRelease, getGitHubReleaseCacheStats } from './lib/releases/github.js';
-import { resolveDesktopAssets } from './lib/releases/resolveDesktopAssets.js';
+import { resolveDesktopAssets, resolveDesktopDownloadAssets } from './lib/releases/resolveDesktopAssets.js';
 import { validateDesktopDownloadsPayload, validateDesktopUpdateManifest } from './lib/releases/validation.js';
 import { consumeRateLimit, getRateLimitKeyCount } from './lib/ratelimit.js';
 import { stripe, mapStripeSubscriptionStatus } from './lib/stripe.js';
@@ -292,6 +292,14 @@ async function getReadinessReport() {
     github: {
       repoConfigured: Boolean(config.GITHUB_REPO_OWNER && config.GITHUB_REPO_NAME),
     },
+    checkGitHubRelease: async () => {
+      if (config.DESKTOP_RELEASE_SOURCE !== 'github') {
+        return;
+      }
+
+      const releaseResult = await fetchDesktopRelease();
+      resolveDesktopDownloadAssets(releaseResult.release);
+    },
     checkDatabase: async () => {
       await prisma.$queryRaw`SELECT 1`;
     },
@@ -527,7 +535,7 @@ async function getDesktopDownloadsPayload() {
   }
 
   const releaseResult = await fetchDesktopRelease();
-  const resolved = await resolveDesktopAssets(releaseResult.release);
+  const resolved = resolveDesktopDownloadAssets(releaseResult.release);
 
   fastify.log.info(
     {
@@ -540,9 +548,9 @@ async function getDesktopDownloadsPayload() {
 
   return {
     version: resolved.version,
-    windowsUrl: resolved.windows.url,
-    macIntelUrl: resolved.macIntel.url,
-    macArmUrl: resolved.macArm.url,
+    windowsUrl: resolved.windowsUrl,
+    macIntelUrl: resolved.macIntelUrl,
+    macArmUrl: resolved.macArmUrl,
     notes: resolved.notes,
     publishedAt: resolved.publishedAt,
   };

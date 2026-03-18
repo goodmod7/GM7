@@ -19,4 +19,4 @@ services:
       - key: DESKTOP_RELEASE_SOURCE
         value: github
       - key: DESKTOP_RELEASE_TAG
-        value: v0.1.0-beta.1
+        value: latest

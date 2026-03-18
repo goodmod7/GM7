@@ -78,6 +78,15 @@ pnpm render:api:migrate
 NEXT_PUBLIC_API_BASE=https://api.<your-domain>
 ```
 
+Render must also allow that frontend origin:
+
+```bash
+WEB_ORIGIN=https://app.<your-domain>
+APP_BASE_URL=https://app.<your-domain>
+```
+
+For provider-default bring-up URLs, use the exact deployed frontend hostname, for example `WEB_ORIGIN=https://gm7-tau.vercel.app`.
+
 ## First Smoke Checks
 
 Run these after both deployments are up:
@@ -106,6 +115,8 @@ If desktop release metadata is configured through GitHub:
 
 - Redis is required for full queue reliability across API instances
 - signed stable desktop releases provide the best install/update experience
-- beta releases are acceptable for internal testing
+- beta releases are acceptable for internal testing, but only if the pinned release tag exists
+- `/downloads/desktop` is public and only needs installer assets
+- `/updates/desktop/:platform/:arch/:currentVersion.json` still requires signed release assets and `.sig` files
 - `BILLING_ENABLED=false` is the safest first deployment state unless Stripe is already configured
 - custom sibling subdomains are preferred for cookie auth; provider-default hostnames are acceptable only for initial bring-up/testing

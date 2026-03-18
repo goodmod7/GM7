@@ -16,6 +16,7 @@ export interface ReadinessInput {
   github: {
     repoConfigured: boolean;
   };
+  checkGitHubRelease?: () => Promise<void>;
   checkDatabase: () => Promise<void>;
   checkSchema: () => Promise<void>;
 }
@@ -61,6 +62,13 @@ export async function evaluateReadiness(input: ReadinessInput): Promise<Readines
     checks.github = input.github.repoConfigured;
     if (!checks.github) {
       failures.push('GitHub desktop release config is incomplete');
+    } else if (input.checkGitHubRelease) {
+      try {
+        await input.checkGitHubRelease();
+      } catch {
+        checks.github = false;
+        failures.push('GitHub desktop release is unavailable');
+      }
     }
   }
 

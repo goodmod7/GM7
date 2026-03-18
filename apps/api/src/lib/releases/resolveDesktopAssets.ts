@@ -11,6 +11,15 @@ export interface ResolvedDesktopRelease {
   macArm: { url: string; signature: string };
 }
 
+export interface ResolvedDesktopDownloads {
+  version: string;
+  notes: string;
+  publishedAt: string | null;
+  windowsUrl: string;
+  macIntelUrl: string;
+  macArmUrl: string;
+}
+
 export type DesktopTarget = 'windows-x86_64' | 'macos-x86_64' | 'macos-aarch64';
 
 const NOTES_MAX_LENGTH = 10_000;
@@ -59,7 +68,16 @@ async function resolveSignedAsset(release: GitHubRelease, assetName: string) {
   };
 }
 
-export async function resolveDesktopAssets(release: GitHubRelease): Promise<ResolvedDesktopRelease> {
+function resolveDownloadAsset(release: GitHubRelease, assetName: string) {
+  const installerAsset = getRequiredAsset(release, assetName);
+
+  return validateDesktopAssetUrl(installerAsset.browserDownloadUrl, assetName, {
+    nodeEnv: 'production',
+    allowInsecureDev: false,
+  });
+}
+
+export function resolveDesktopDownloadAssets(release: GitHubRelease): ResolvedDesktopDownloads {
   const version = stripLeadingV(release.tagName);
   const assetNames = buildDesktopAssetNames(version);
 
@@ -67,6 +85,20 @@ export async function resolveDesktopAssets(release: GitHubRelease): Promise<Reso
     version,
     notes: truncateNotes(release.body),
     publishedAt: release.publishedAt,
+    windowsUrl: resolveDownloadAsset(release, assetNames['windows-x86_64']),
+    macIntelUrl: resolveDownloadAsset(release, assetNames['macos-x86_64']),
+    macArmUrl: resolveDownloadAsset(release, assetNames['macos-aarch64']),
+  };
+}
+
+export async function resolveDesktopAssets(release: GitHubRelease): Promise<ResolvedDesktopRelease> {
+  const downloads = resolveDesktopDownloadAssets(release);
+  const assetNames = buildDesktopAssetNames(downloads.version);
+
+  return {
+    version: downloads.version,
+    notes: downloads.notes,
+    publishedAt: downloads.publishedAt,
     windows: await resolveSignedAsset(release, assetNames['windows-x86_64']),
     macIntel: await resolveSignedAsset(release, assetNames['macos-x86_64']),
     macArm: await resolveSignedAsset(release, assetNames['macos-aarch64']),

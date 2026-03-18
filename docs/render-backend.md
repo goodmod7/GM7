@@ -66,6 +66,7 @@ pnpm --filter @ai-operator/api prisma:generate && pnpm --filter @ai-operator/api
   - Strong random admin key for `/admin/health` and `/metrics`
 - `WEB_ORIGIN`
   - Final frontend origin, for example `https://app.example.com`
+  - This value is the API CORS allowlist and may be comma-separated if you serve the web app from more than one origin during bring-up
 - `APP_BASE_URL`
   - Final frontend origin, for example `https://app.example.com`
 - `API_PUBLIC_BASE_URL`
@@ -83,7 +84,7 @@ pnpm --filter @ai-operator/api prisma:generate && pnpm --filter @ai-operator/api
 - `METRICS_PUBLIC=false`
 - `BILLING_ENABLED=false`
 - `DESKTOP_RELEASE_SOURCE=github`
-- `DESKTOP_RELEASE_TAG=v0.1.0-beta.1`
+- `DESKTOP_RELEASE_TAG=latest`
 - `RUN_RECOVERY_POLICY=fail`
 - `ALLOW_INSECURE_DEV=false`
 
@@ -123,8 +124,15 @@ For the initial production bring-up:
 - `METRICS_PUBLIC=false`
 - `BILLING_ENABLED=false`
 - `DESKTOP_RELEASE_SOURCE=github`
-- `DESKTOP_RELEASE_TAG=v0.1.0-beta.1`
+- `DESKTOP_RELEASE_TAG=latest`
 - `ALLOW_INSECURE_DEV=false`
+
+## Desktop Release Notes
+
+- `GET /downloads/desktop` is public and only needs installer assets for the configured release.
+- `GET /updates/desktop/:platform/:arch/:currentVersion.json` still requires signed desktop release assets with matching `.sig` files.
+- Only pin `DESKTOP_RELEASE_TAG` when that tag really exists in GitHub Releases. A stale tag will make `/downloads/desktop` return `503 Downloads are not configured`.
+- If you deploy the frontend on a provider hostname such as `https://gm7-tau.vercel.app`, add that exact origin to `WEB_ORIGIN` on Render or browser requests will fail with `Origin not allowed`.
 
 ## Startup Validation Notes
 

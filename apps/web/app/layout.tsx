@@ -1,8 +1,10 @@
 import type { Metadata } from 'next';
+import './globals.css';
+import { SiteShell } from '../components/site-shell';
 
 export const metadata: Metadata = {
-  title: 'AI Operator',
-  description: 'TeamViewer-style AI operator platform',
+  title: 'GORKH',
+  description: 'Desktop intelligence layer for local-first operator workflows',
 };
 
 export default function RootLayout({
@@ -12,7 +14,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body style={{ margin: 0, fontFamily: 'system-ui, sans-serif' }}>{children}</body>
+      <body>
+        <SiteShell>{children}</SiteShell>
+      </body>
     </html>
   );
 }

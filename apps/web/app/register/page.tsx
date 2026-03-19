@@ -2,8 +2,10 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { ArrowRight, KeySquare, UserPlus } from 'lucide-react';
 import Link from 'next/link';
 import { apiFetch } from '../../lib/auth';
+import { Banner, Button, Card, FieldLabel, TextInput } from '../../components/ui';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -36,19 +38,59 @@ export default function RegisterPage() {
   };
 
   return (
-    <main style={{ padding: '2rem', maxWidth: '420px', margin: '0 auto' }}>
-      <h1>Register</h1>
-      <form onSubmit={handleSubmit} style={{ display: 'grid', gap: '1rem' }}>
-        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" required />
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password (min 8 chars)" minLength={8} required />
-        <button type="submit" disabled={loading}>
-          {loading ? 'Creating account...' : 'Register'}
-        </button>
-      </form>
-      {error && <p style={{ color: '#dc2626' }}>{error}</p>}
-      <p style={{ marginTop: '1rem' }}>
-        Already registered? <Link href="/login">Login</Link>
-      </p>
+    <main className="page page--center">
+      <Card className="auth-card">
+        <div className="hero" style={{ gap: 16, textAlign: 'center' }}>
+          <div className="eyebrow" style={{ justifyContent: 'center' }}>
+            <KeySquare size={14} />
+            Operator initialization
+          </div>
+          <div>
+            <UserPlus size={24} style={{ margin: '0 auto 16px', color: 'rgba(255,255,255,0.55)' }} />
+            <h1 className="section-heading" style={{ fontSize: 30 }}>
+              Register
+            </h1>
+            <p className="copy" style={{ marginTop: 10 }}>
+              Create an operator identity for dashboard access, billing, downloads, and desktop sign-in relay.
+            </p>
+          </div>
+        </div>
+
+        {error ? (
+          <div style={{ marginTop: 20 }}>
+            <Banner tone="danger">{error}</Banner>
+          </div>
+        ) : null}
+
+        <form onSubmit={handleSubmit} className="stack" style={{ marginTop: 26 }}>
+          <div>
+            <FieldLabel>Operator Email</FieldLabel>
+            <TextInput type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" required />
+          </div>
+          <div>
+            <FieldLabel>Passphrase</FieldLabel>
+            <TextInput
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password (min 8 chars)"
+              minLength={8}
+              required
+            />
+          </div>
+          <Button type="submit" loading={loading} className="button--wide">
+            <ArrowRight size={16} />
+            {loading ? 'Creating account...' : 'Register'}
+          </Button>
+        </form>
+
+        <p className="small-note" style={{ marginTop: 18, textAlign: 'center' }}>
+          Already registered?{' '}
+          <Link href="/login" style={{ color: 'var(--text)' }}>
+            Login
+          </Link>
+        </p>
+      </Card>
     </main>
   );
 }

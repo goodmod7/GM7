@@ -1,9 +1,42 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState, type MouseEvent, type WheelEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { apiFetch, buildApiUrl, getBillingStatus, getMe, getSessions, logout, logoutAllSessions, type BillingStatus, type BrowserSession } from '../../../lib/auth';
+import {
+  Activity,
+  AlertCircle,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  CreditCard,
+  Eye,
+  Keyboard,
+  Loader2,
+  LogOut,
+  Monitor,
+  MousePointer2,
+  Play,
+  RefreshCcw,
+  Server,
+  Square,
+  Terminal,
+  X,
+  Zap,
+} from 'lucide-react';
+import {
+  apiFetch,
+  buildApiUrl,
+  getBillingStatus,
+  getMe,
+  getSessions,
+  logout,
+  logoutAllSessions,
+  type BillingStatus,
+  type BrowserSession,
+} from '../../../lib/auth';
+import { Badge, Banner, Button, Card, FieldLabel, Select, TextArea, TextInput } from '../../../components/ui';
 
 interface Device {
   deviceId: string;
@@ -12,8 +45,8 @@ interface Device {
   connected: boolean;
   paired: boolean;
   pairingCode?: string;
-  pairingExpiresAt?: number;
-  lastSeenAt: number;
+  pairingExpiresAt?: number | string;
+  lastSeenAt: number | string;
   screenStreamState?: {
     enabled: boolean;
     fps: 1 | 2;
@@ -21,10 +54,9 @@ interface Device {
   };
   controlState?: {
     enabled: boolean;
-    updatedAt: number;
+    updatedAt: number | string;
     requestedBy?: string;
   };
-  // Iteration 8: Workspace state
   workspaceState?: {
     configured: boolean;
     rootName?: string;
@@ -46,7 +78,6 @@ interface RunStep {
   logs: LogLine[];
 }
 
-// Iteration 6: Agent Proposal types
 interface ProposeActionProposal {
   kind: 'propose_action';
   action: {
@@ -85,11 +116,10 @@ interface Run {
   deviceId: string;
   goal: string;
   status: 'queued' | 'running' | 'waiting_for_user' | 'done' | 'failed' | 'canceled';
-  createdAt: number;
-  updatedAt: number;
+  createdAt: number | string;
+  updatedAt: number | string;
   reason?: string;
   steps: RunStep[];
-  // Iteration 6: AI Assist fields
   mode?: 'manual' | 'ai_assist';
   constraints?: {
     maxActions: number;
@@ -124,7 +154,6 @@ interface DeviceAction {
   runId?: string;
 }
 
-// Iteration 8: Tool Summary type
 type ToolEventStatus = 'requested' | 'awaiting_user' | 'approved' | 'denied' | 'executed' | 'failed';
 
 interface ToolSummary {
@@ -158,16 +187,122 @@ interface SSEEvent {
   tool?: ToolSummary;
 }
 
-const hotkeyBtnStyle: React.CSSProperties = {
-  padding: '0.25rem 0.5rem',
-  borderRadius: '4px',
-  border: '1px solid #d1d5db',
-  background: '#f9fafb',
-  cursor: 'pointer',
-  fontSize: '0.75rem',
-};
+function formatDateTime(value: number | string | null | undefined): string {
+  if (value === null || value === undefined) {
+    return 'Unknown';
+  }
 
-export default function LegacyDashboard() {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+
+  return date.toLocaleString();
+}
+
+function formatClockTime(value: number | string | null | undefined): string {
+  if (value === null || value === undefined) {
+    return '--:--:--';
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '--:--:--';
+  }
+
+  return date.toLocaleTimeString();
+}
+
+function getTimeRemaining(expiresAt: number | string | undefined): string {
+  if (!expiresAt) {
+    return '0:00';
+  }
+
+  const expiry = typeof expiresAt === 'number' ? expiresAt : new Date(expiresAt).getTime();
+  const remaining = Math.max(0, expiry - Date.now());
+  const minutes = Math.floor(remaining / 60_000);
+  const seconds = Math.floor((remaining % 60_000) / 1_000);
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function getDeviceName(device: Device): string {
+  return device.deviceName?.trim() || `Desktop-${device.deviceId.slice(0, 8)}`;
+}
+
+function getStatusTone(status: string): 'info' | 'success' | 'warning' | 'danger' {
+  if (status === 'connected' || status === 'paired' || status === 'done' || status === 'executed' || status === 'active') {
+    return 'success';
+  }
+
+  if (status === 'failed' || status === 'canceled' || status === 'denied') {
+    return 'danger';
+  }
+
+  if (status === 'offline' || status === 'unpaired' || status === 'queued' || status === 'requested' || status === 'awaiting_user') {
+    return 'warning';
+  }
+
+  return 'info';
+}
+
+function summarizeAction(action: DeviceAction['action']): string {
+  switch (action.kind) {
+    case 'type': {
+      const text = typeof action.text === 'string' ? action.text : '';
+      return `Type "${text.slice(0, 28)}${text.length > 28 ? '…' : ''}"`;
+    }
+    case 'click':
+      return `Click at ${Math.round(((action.x as number) || 0) * 100)}%, ${Math.round(((action.y as number) || 0) * 100)}%`;
+    case 'double_click':
+      return 'Double-click';
+    case 'scroll':
+      return 'Scroll';
+    case 'hotkey':
+      return `Hotkey ${(action.key as string) || 'unknown'}`;
+    default:
+      return action.kind;
+  }
+}
+
+function getCompletedStepsCount(run: Run): number {
+  return (run.steps || []).filter((step) => step.status === 'done').length;
+}
+
+function renderLatestProposal(proposal: AgentProposal) {
+  switch (proposal.kind) {
+    case 'propose_action':
+      return (
+        <div className="stack" style={{ gap: 6 }}>
+          <p className="small-note" style={{ color: '#fde68a' }}>
+            Action: {summarizeAction({ actionId: '', deviceId: '', action: proposal.action, status: 'requested', createdAt: 0, updatedAt: 0 }.action)}
+          </p>
+          <p className="small-note">{proposal.rationale}</p>
+          {proposal.confidence !== undefined ? (
+            <p className="small-note mono">Confidence: {Math.round(proposal.confidence * 100)}%</p>
+          ) : null}
+        </div>
+      );
+    case 'propose_tool':
+      return (
+        <div className="stack" style={{ gap: 6 }}>
+          <p className="small-note" style={{ color: '#fde68a' }}>
+            Tool: {proposal.toolCall.tool}
+            {proposal.toolCall.path ? ` → ${proposal.toolCall.path}` : ''}
+            {proposal.toolCall.cmd ? ` → ${proposal.toolCall.cmd}` : ''}
+          </p>
+          <p className="small-note">{proposal.rationale}</p>
+        </div>
+      );
+    case 'ask_user':
+      return <p className="small-note">Question: {proposal.question}</p>;
+    case 'done':
+      return <p className="small-note">Summary: {proposal.summary}</p>;
+    default:
+      return null;
+  }
+}
+
+export default function LegacyDashboardPage() {
   const router = useRouter();
   const [devices, setDevices] = useState<Device[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -180,25 +315,24 @@ export default function LegacyDashboard() {
   const [manualPairCode, setManualPairCode] = useState('');
   const [manualPairLoading, setManualPairLoading] = useState(false);
   const [newRunGoal, setNewRunGoal] = useState('');
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
   const [selectedRunMode, setSelectedRunMode] = useState<'manual' | 'ai_assist'>('manual');
-  
-  // Screen preview state
   const [previewDeviceId, setPreviewDeviceId] = useState<string | null>(null);
   const [screenMeta, setScreenMeta] = useState<ScreenFrameMeta | null>(null);
   const [screenTimestamp, setScreenTimestamp] = useState<number>(0);
-  
-  // Control state
   const [actions, setActions] = useState<DeviceAction[]>([]);
   const [typeText, setTypeText] = useState('');
-  
-  // Iteration 8: Tool timeline state (per runId)
   const [runTools, setRunTools] = useState<Record<string, ToolSummary[]>>({});
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [sessions, setSessions] = useState<BrowserSession[]>([]);
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [telemetry, setTelemetry] = useState<string[]>([]);
+
+  const appendTelemetry = useCallback((message: string) => {
+    setTelemetry((prev) => [`[${formatClockTime(Date.now())}] ${message}`, ...prev].slice(0, 40));
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -218,11 +352,10 @@ export default function LegacyDashboard() {
         setUserEmail(user.email);
         setAuthReady(true);
       } catch (err) {
-        if (!active) {
-          return;
+        if (active) {
+          setError(err instanceof Error ? err.message : 'Failed to load session');
+          setLoading(false);
         }
-        setError(err instanceof Error ? err.message : 'Failed to load session');
-        setLoading(false);
       }
     })();
 
@@ -231,34 +364,39 @@ export default function LegacyDashboard() {
     };
   }, [router]);
 
-  // Fetch initial data
   const fetchInitialData = useCallback(async () => {
-    if (!authReady) return;
+    if (!authReady) {
+      return;
+    }
+
     try {
       setError(null);
-      
-      const devicesRes = await apiFetch('/devices');
-      if (devicesRes.status === 401) {
+
+      const devicesResponse = await apiFetch('/devices');
+      if (devicesResponse.status === 401) {
         router.replace('/login');
         return;
       }
-      if (!devicesRes.ok) throw new Error('Failed to fetch devices');
-      const devicesData = await devicesRes.json();
-      setDevices(devicesData.devices || []);
+      const devicesPayload = await devicesResponse.json().catch(() => ({ error: 'Failed to fetch devices' }));
+      if (!devicesResponse.ok) {
+        throw new Error(devicesPayload.error || 'Failed to fetch devices');
+      }
 
-      const runsRes = await apiFetch('/runs');
-      if (runsRes.status === 401) {
+      const runsResponse = await apiFetch('/runs');
+      if (runsResponse.status === 401) {
         router.replace('/login');
         return;
       }
-      if (!runsRes.ok) throw new Error('Failed to fetch runs');
-      const runsData = await runsRes.json();
-      setRuns(runsData.runs || []);
+      const runsPayload = await runsResponse.json().catch(() => ({ error: 'Failed to fetch runs' }));
+      if (!runsResponse.ok) {
+        throw new Error(runsPayload.error || 'Failed to fetch runs');
+      }
 
-      const sessionsData = await getSessions();
+      const [sessionsData, billingStatus] = await Promise.all([getSessions(), getBillingStatus()]);
+
+      setDevices((devicesPayload.devices || []) as Device[]);
+      setRuns((runsPayload.runs || []) as Run[]);
       setSessions(sessionsData);
-
-      const billingStatus = await getBillingStatus();
       setBilling(billingStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -267,58 +405,56 @@ export default function LegacyDashboard() {
     }
   }, [authReady, router]);
 
-  // Setup SSE connection
   useEffect(() => {
     if (!authReady) {
       return;
     }
 
-    fetchInitialData();
+    void fetchInitialData();
 
     const setupSSE = () => {
       let opened = false;
-      const es = new EventSource(buildApiUrl('/events', { includeAccessTokenQuery: true }), { withCredentials: true });
+      const eventSource = new EventSource(buildApiUrl('/events', { includeAccessTokenQuery: true }), {
+        withCredentials: true,
+      });
 
-      es.onopen = () => {
+      eventSource.onopen = () => {
         opened = true;
-        console.log('[SSE] Connected');
         setSseConnected(true);
+        appendTelemetry('LIVE_UPDATES connected');
       };
 
-      es.onmessage = (event) => {
+      eventSource.onmessage = (event) => {
         try {
           const data: SSEEvent = JSON.parse(event.data);
-          console.log('[SSE] Received:', data.type);
 
           switch (data.type) {
             case 'run_update':
               if (data.run) {
-                const updatedRun = data.run;
                 setRuns((prev) => {
-                  const existing = prev.find((r) => r.runId === updatedRun.runId);
+                  const existing = prev.find((run) => run.runId === data.run!.runId);
                   if (existing) {
-                    return prev.map((r) => (r.runId === updatedRun.runId ? updatedRun : r));
+                    return prev.map((run) => (run.runId === data.run!.runId ? data.run! : run));
                   }
-                  return [...prev, updatedRun];
+                  return [data.run!, ...prev];
                 });
+                appendTelemetry(`RUN ${data.run.runId.slice(0, 8)} ${data.run.status}`);
               }
               break;
 
             case 'step_update':
               if (data.runId && data.step) {
                 setRuns((prev) =>
-                  prev.map((r) => {
-                    if (r.runId === data.runId) {
-                      return {
-                        ...r,
-                        steps: r.steps.map((s) =>
-                          s.stepId === data.step!.stepId ? data.step! : s
-                        ),
-                      };
-                    }
-                    return r;
-                  })
+                  prev.map((run) =>
+                    run.runId === data.runId
+                      ? {
+                          ...run,
+                          steps: (run.steps || []).map((step) => (step.stepId === data.step!.stepId ? data.step! : step)),
+                        }
+                      : run
+                  )
                 );
+                appendTelemetry(`STEP ${data.step.stepId.slice(0, 8)} ${data.step.status}`);
               }
               break;
 
@@ -326,121 +462,159 @@ export default function LegacyDashboard() {
               if (data.deviceId && data.meta) {
                 setScreenMeta(data.meta);
                 setScreenTimestamp(Date.now());
+                appendTelemetry(`SCREEN ${data.deviceId.slice(0, 8)} updated`);
               }
               break;
 
             case 'action_update':
               if (data.action) {
-                const updatedAction = data.action;
                 setActions((prev) => {
-                  const existing = prev.find((a) => a.actionId === updatedAction.actionId);
+                  const existing = prev.find((action) => action.actionId === data.action!.actionId);
                   if (existing) {
-                    return prev.map((a) => (a.actionId === updatedAction.actionId ? updatedAction : a));
+                    return prev.map((action) => (action.actionId === data.action!.actionId ? data.action! : action));
                   }
-                  return [updatedAction, ...prev].slice(0, 20);
+                  return [data.action!, ...prev].slice(0, 20);
                 });
+                appendTelemetry(`ACTION ${data.action.action.kind} ${data.action.status}`);
               }
               break;
 
             case 'tool_update':
-              if (data.tool) {
-                const tool = data.tool;
-                if (tool.runId) {
-                  setRunTools((prev) => {
-                    const existing = prev[tool.runId!]?.find((t) => t.toolEventId === tool.toolEventId);
-                    let updated;
-                    if (existing) {
-                      updated = {
-                        ...prev,
-                        [tool.runId!]: prev[tool.runId!].map((t) =>
-                          t.toolEventId === tool.toolEventId ? tool : t
-                        ),
-                      };
-                    } else {
-                      updated = {
-                        ...prev,
-                        [tool.runId!]: [tool, ...(prev[tool.runId!] || [])].slice(0, 50),
-                      };
-                    }
-                    return updated;
-                  });
-                }
+              if (data.tool?.runId) {
+                setRunTools((prev) => {
+                  const runId = data.tool!.runId!;
+                  const existing = prev[runId]?.find((tool) => tool.toolEventId === data.tool!.toolEventId);
+                  if (existing) {
+                    return {
+                      ...prev,
+                      [runId]: prev[runId].map((tool) => (tool.toolEventId === data.tool!.toolEventId ? data.tool! : tool)),
+                    };
+                  }
+
+                  return {
+                    ...prev,
+                    [runId]: [data.tool!, ...(prev[runId] || [])].slice(0, 50),
+                  };
+                });
+                appendTelemetry(`TOOL ${data.tool.tool} ${data.tool.status}`);
               }
               break;
+
+            case 'log_line':
+              if (data.log?.line) {
+                appendTelemetry(data.log.line);
+              }
+              break;
+
+            case 'device_update':
+              if (data.deviceId) {
+                appendTelemetry(`DEVICE ${data.deviceId.slice(0, 8)} updated`);
+              }
+              break;
+
+            case 'connected':
+              appendTelemetry('LIVE_UPDATES ready');
+              break;
           }
-        } catch (err) {
-          console.error('[SSE] Failed to parse message:', err);
+        } catch {
+          appendTelemetry('LIVE_UPDATES parse_error');
         }
       };
 
-      es.onerror = (err) => {
-        console.error('[SSE] Error:', err);
+      eventSource.onerror = () => {
         setSseConnected(false);
+        appendTelemetry('LIVE_UPDATES disconnected');
+
         if (!opened) {
           setError('Please log in again');
-          es.close();
+          eventSource.close();
           return;
         }
+
         setTimeout(() => {
-          if (es.readyState === EventSource.CLOSED) {
+          if (eventSource.readyState === EventSource.CLOSED) {
             setupSSE();
           }
-        }, 3000);
+        }, 3_000);
       };
 
-      return es;
+      return eventSource;
     };
 
-    const es = setupSSE();
+    const eventSource = setupSSE();
 
-    // Poll devices every 3 seconds
     const interval = setInterval(async () => {
       try {
-        const res = await apiFetch('/devices');
-        if (res.ok) {
-          const data = await res.json();
-          setDevices(data.devices || []);
+        const response = await apiFetch('/devices');
+        if (!response.ok) {
+          return;
         }
+        const payload = await response.json();
+        setDevices((payload.devices || []) as Device[]);
       } catch {
-        // Ignore polling errors
+        appendTelemetry('DEVICE poll_failed');
       }
-    }, 3000);
+    }, 3_000);
 
     return () => {
       clearInterval(interval);
-      es.close();
+      eventSource.close();
     };
-  }, [authReady, fetchInitialData]);
+  }, [appendTelemetry, authReady, fetchInitialData]);
+
+  useEffect(() => {
+    if (devices.length === 0) {
+      if (selectedDeviceId) {
+        setSelectedDeviceId('');
+      }
+      if (previewDeviceId) {
+        setPreviewDeviceId(null);
+      }
+      return;
+    }
+
+    const selectedExists = devices.some((device) => device.deviceId === selectedDeviceId);
+    if (!selectedExists) {
+      setSelectedDeviceId(devices[0].deviceId);
+    }
+
+    if (previewDeviceId && !devices.some((device) => device.deviceId === previewDeviceId)) {
+      setPreviewDeviceId(null);
+    }
+  }, [devices, previewDeviceId, selectedDeviceId]);
 
   const submitPairing = async (deviceId: string, pairingCode: string) => {
-    const res = await apiFetch(`/devices/${deviceId}/pair`, {
+    const response = await apiFetch(`/devices/${deviceId}/pair`, {
       method: 'POST',
       body: JSON.stringify({ pairingCode }),
     });
 
-    if (!res.ok) {
-      const data = await res.json();
-      throw new Error(data.error || 'Pairing failed');
+    const payload = await response.json().catch(() => ({ error: 'Pairing failed' }));
+    if (!response.ok) {
+      throw new Error(payload.error || 'Pairing failed');
     }
 
-    const devicesRes = await apiFetch('/devices');
-    if (devicesRes.ok) {
-      const data = await devicesRes.json();
-      setDevices(data.devices || []);
+    const devicesResponse = await apiFetch('/devices');
+    if (devicesResponse.ok) {
+      const devicesPayload = await devicesResponse.json();
+      setDevices((devicesPayload.devices || []) as Device[]);
     }
   };
 
   const handlePairSubmit = async (deviceId: string) => {
     const code = pairingInputs[deviceId]?.trim().toUpperCase();
-    if (!code) return;
+    if (!code) {
+      return;
+    }
 
     setPairingLoading((prev) => ({ ...prev, [deviceId]: true }));
 
     try {
       await submitPairing(deviceId, code);
       setPairingInputs((prev) => ({ ...prev, [deviceId]: '' }));
+      appendTelemetry(`PAIR ${deviceId.slice(0, 8)} submitted`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Pairing failed');
+      window.alert(err instanceof Error ? err.message : 'Pairing failed');
     } finally {
       setPairingLoading((prev) => ({ ...prev, [deviceId]: false }));
     }
@@ -449,7 +623,9 @@ export default function LegacyDashboard() {
   const handleManualPairSubmit = async () => {
     const deviceId = manualPairDeviceId.trim();
     const code = manualPairCode.trim().toUpperCase();
-    if (!deviceId || !code) return;
+    if (!deviceId || !code) {
+      return;
+    }
 
     setManualPairLoading(true);
 
@@ -457,8 +633,9 @@ export default function LegacyDashboard() {
       await submitPairing(deviceId, code);
       setManualPairDeviceId('');
       setManualPairCode('');
+      appendTelemetry(`PAIR ${deviceId.slice(0, 8)} submitted`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Pairing failed');
+      window.alert(err instanceof Error ? err.message : 'Pairing failed');
     } finally {
       setManualPairLoading(false);
     }
@@ -466,51 +643,57 @@ export default function LegacyDashboard() {
 
   const handleCreateRun = async () => {
     if (billing?.subscriptionStatus !== 'active') {
-      alert('An active subscription is required to create runs.');
+      window.alert('An active subscription is required to create runs.');
       return;
     }
-    if (!selectedDeviceId || !newRunGoal.trim()) return;
+
+    if (!selectedDeviceId || !newRunGoal.trim()) {
+      return;
+    }
 
     try {
-      const res = await apiFetch('/runs', {
+      const response = await apiFetch('/runs', {
         method: 'POST',
-        body: JSON.stringify({ 
-          deviceId: selectedDeviceId, 
-          goal: newRunGoal,
+        body: JSON.stringify({
+          deviceId: selectedDeviceId,
+          goal: newRunGoal.trim(),
           mode: selectedRunMode,
         }),
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to create run');
+      const payload = await response.json().catch(() => ({ error: 'Failed to create run' }));
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to create run');
       }
 
       setNewRunGoal('');
-      
-      const runsRes = await apiFetch('/runs');
-      if (runsRes.ok) {
-        const data = await runsRes.json();
-        setRuns(data.runs || []);
+      appendTelemetry(`RUN ${selectedRunMode} created`);
+
+      const runsResponse = await apiFetch('/runs');
+      if (runsResponse.ok) {
+        const runsPayload = await runsResponse.json();
+        setRuns((runsPayload.runs || []) as Run[]);
       }
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to create run');
+      window.alert(err instanceof Error ? err.message : 'Failed to create run');
     }
   };
 
   const handleCancelRun = async (runId: string) => {
     try {
-      const res = await apiFetch(`/runs/${runId}/cancel`, {
+      const response = await apiFetch(`/runs/${runId}/cancel`, {
         method: 'POST',
         body: JSON.stringify({ reason: 'Canceled from dashboard' }),
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to cancel run');
+      const payload = await response.json().catch(() => ({ error: 'Failed to cancel run' }));
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to cancel run');
       }
+
+      appendTelemetry(`RUN ${runId.slice(0, 8)} canceled`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to cancel run');
+      window.alert(err instanceof Error ? err.message : 'Failed to cancel run');
     }
   };
 
@@ -518,19 +701,19 @@ export default function LegacyDashboard() {
     setSelectedRunId(runId);
 
     try {
-      const res = await apiFetch(`/runs/${runId}/tools`);
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to fetch tool timeline');
+      const response = await apiFetch(`/runs/${runId}/tools`);
+      const payload = await response.json().catch(() => ({ error: 'Failed to fetch tool timeline' }));
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to fetch tool timeline');
       }
 
-      const data = await res.json();
       setRunTools((prev) => ({
         ...prev,
-        [runId]: data.tools || [],
+        [runId]: (payload.tools || []) as ToolSummary[],
       }));
+      appendTelemetry(`TOOLS ${runId.slice(0, 8)} loaded`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to fetch tool timeline');
+      window.alert(err instanceof Error ? err.message : 'Failed to fetch tool timeline');
     }
   };
 
@@ -539,1105 +722,883 @@ export default function LegacyDashboard() {
       await logoutAllSessions();
       router.push('/login');
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to log out all sessions');
+      window.alert(err instanceof Error ? err.message : 'Failed to log out all sessions');
     }
   };
 
-  // Send control action
   const sendAction = async (action: DeviceAction['action']) => {
     if (billing?.subscriptionStatus !== 'active') {
-      alert('An active subscription is required for remote control.');
+      window.alert('An active subscription is required for remote control.');
       return;
     }
-    if (!previewDeviceId) return;
-    
+
+    if (!previewDeviceId) {
+      return;
+    }
+
     try {
-      const res = await apiFetch(`/devices/${previewDeviceId}/actions`, {
+      const response = await apiFetch(`/devices/${previewDeviceId}/actions`, {
         method: 'POST',
         body: JSON.stringify({ action }),
       });
 
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to send action');
+      const payload = await response.json().catch(() => ({ error: 'Failed to send action' }));
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to send action');
       }
+
+      appendTelemetry(`ACTION ${action.kind} sent`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to send action');
+      window.alert(err instanceof Error ? err.message : 'Failed to send action');
     }
   };
 
-  const handleImageClick = (e: React.MouseEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    const rect = img.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-    
-    sendAction({ kind: 'click', x, y, button: 'left' });
+  const handleImageClick = (event: MouseEvent<HTMLImageElement>) => {
+    const image = event.currentTarget;
+    const rect = image.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    void sendAction({ kind: 'click', x, y, button: 'left' });
   };
 
   const handleTypeSubmit = () => {
-    if (!typeText.trim()) return;
-    sendAction({ kind: 'type', text: typeText });
+    if (!typeText.trim()) {
+      return;
+    }
+    void sendAction({ kind: 'type', text: typeText });
     setTypeText('');
   };
 
   const handleHotkey = (key: string, modifiers?: string[]) => {
-    sendAction({ kind: 'hotkey', key, modifiers });
+    void sendAction({ kind: 'hotkey', key, modifiers });
   };
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    sendAction({ kind: 'scroll', dx: e.deltaX, dy: e.deltaY });
+  const handleWheel = (event: WheelEvent<HTMLImageElement>) => {
+    event.preventDefault();
+    void sendAction({ kind: 'scroll', dx: event.deltaX, dy: event.deltaY });
   };
 
-  const formatTime = (timestamp: number): string => {
-    return new Date(timestamp).toLocaleTimeString();
-  };
-
-  const getTimeRemaining = (expiresAt: number): string => {
-    const remaining = Math.max(0, expiresAt - Date.now());
-    const minutes = Math.floor(remaining / 60000);
-    const seconds = Math.floor((remaining % 60000) / 1000);
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-  };
-
-  const pairedDevices = devices.filter((d) => d.paired);
-  const previewDevice = previewDeviceId ? devices.find((d) => d.deviceId === previewDeviceId) : null;
+  const pairedDevices = devices.filter((device) => device.paired);
+  const selectedDevice = devices.find((device) => device.deviceId === selectedDeviceId) || null;
+  const previewDevice = previewDeviceId ? devices.find((device) => device.deviceId === previewDeviceId) || null : null;
   const hasActiveSubscription = billing?.subscriptionStatus === 'active';
-
-  const getCompletedStepsCount = (run: Run): number => {
-    return run.steps.filter((s) => s.status === 'done').length;
-  };
-
-  // Helper to summarize action for display
-  const summarizeAction = (action: DeviceAction['action']): string => {
-    switch (action.kind) {
-      case 'type':
-        const text = action.text as string;
-        return `Type (${text.length} chars)`;
-      case 'click':
-        return `Click at (${((action.x as number) * 100).toFixed(0)}%, ${((action.y as number) * 100).toFixed(0)}%)`;
-      case 'double_click':
-        return `Double-click`;
-      case 'scroll':
-        return `Scroll`;
-      case 'hotkey':
-        return `Hotkey ${action.key}`;
-      default:
-        return action.kind;
-    }
-  };
+  const previewCanControl = Boolean(previewDevice?.controlState?.enabled && hasActiveSubscription);
+  const visibleRuns = runs
+    .filter((run) => (selectedDevice ? run.deviceId === selectedDevice.deviceId : true))
+    .slice()
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   if (loading) {
     return (
-      <main style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-        <Link href="/" style={{ color: '#0070f3', textDecoration: 'none' }}>
-          ← Back to Home
-        </Link>
-        <p style={{ marginTop: '2rem' }}>Loading...</p>
+      <main className="page--wide">
+        <Card>
+          <div className="banner">
+            <Loader2 size={16} className="spinner" />
+            Loading legacy tools...
+          </div>
+        </Card>
       </main>
     );
   }
 
   return (
-    <main style={{ padding: '2rem', maxWidth: '1400px', margin: '0 auto' }}>
-      <Link href="/" style={{ color: '#0070f3', textDecoration: 'none' }}>
-        ← Back to Home
-      </Link>
+    <main className="page--wide">
+      <Card subtle>
+        <div className="split">
+          <div className="stack" style={{ gap: 14 }}>
+            <div className="row-actions">
+              <Link href="/" className="button button--ghost">
+                <ArrowLeft size={16} />
+                Back Home
+              </Link>
+              <Link href="/dashboard" className="button button--secondary">
+                Main Dashboard
+              </Link>
+            </div>
 
-      <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h1 style={{ margin: 0 }}>Admin / Legacy Tools</h1>
-          <p style={{ margin: '0.35rem 0 0', color: '#6b7280' }}>
-            Migration fallback for debug, older desktop builds, and legacy dashboard-first tools.
-          </p>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <Link
-            href="/dashboard"
-            style={{
-              padding: '0.4rem 0.75rem',
-              background: 'white',
-              border: '1px solid #d1d5db',
-              borderRadius: '6px',
-              color: '#374151',
-              textDecoration: 'none',
-            }}
-          >
-            Main Dashboard
-          </Link>
-          {userEmail && <span style={{ fontSize: '0.875rem', color: '#374151' }}>{userEmail}</span>}
-          <button
-            onClick={() => {
-              void (async () => {
-                try {
-                  await logout();
-                } catch (err) {
-                  console.error('[Auth] Logout failed:', err);
-                } finally {
-                  router.push('/login');
-                }
-              })();
-            }}
-            style={{
-              padding: '0.4rem 0.75rem',
-              background: '#f3f4f6',
-              border: '1px solid #d1d5db',
-              borderRadius: '6px',
-              cursor: 'pointer',
-            }}
-          >
-            Logout
-          </button>
-        </div>
-      </div>
-
-      {/* Connection Status */}
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-        <StatusBadge
-          label={sseConnected ? 'Live Updates' : 'Reconnecting...'}
-          color={sseConnected ? '#10b981' : '#f59e0b'}
-        />
-      </div>
-
-      {error && (
-        <div
-          style={{
-            padding: '1rem',
-            background: '#fee2e2',
-            border: '1px solid #ef4444',
-            borderRadius: '8px',
-            color: '#dc2626',
-            marginBottom: '1rem',
-          }}
-        >
-          Error: {error}
-        </div>
-      )}
-
-      {!hasActiveSubscription && (
-        <div
-          style={{
-            marginTop: '1rem',
-            padding: '1rem',
-            background: '#fff7ed',
-            border: '1px solid #fdba74',
-            borderRadius: '8px',
-            color: '#9a3412',
-          }}
-        >
-          Subscription required to start runs and use remote control. <Link href="/billing">Go to Billing</Link>.
-        </div>
-      )}
-
-      <section
-        style={{
-          marginTop: '1rem',
-          padding: '1rem',
-          background: 'white',
-          borderRadius: '8px',
-          border: '1px solid #e5e7eb',
-        }}
-      >
-        <h2 style={{ marginTop: 0, fontSize: '1.1rem' }}>Pair a desktop device</h2>
-        <p style={{ margin: '0.25rem 0 1rem', color: '#6b7280', fontSize: '0.875rem' }}>
-          If the desktop app shows a pairing code but does not appear in the device list yet, enter its
-          device ID and pairing code here.
-        </p>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <input
-            type="text"
-            placeholder="Enter device ID"
-            value={manualPairDeviceId}
-            onChange={(e) => setManualPairDeviceId(e.target.value)}
-            style={{
-              flex: '1 1 280px',
-              padding: '0.5rem 0.75rem',
-              borderRadius: '4px',
-              border: '1px solid #ddd',
-              fontSize: '0.875rem',
-            }}
-          />
-          <input
-            type="text"
-            placeholder="Enter pairing code"
-            value={manualPairCode}
-            onChange={(e) => setManualPairCode(e.target.value.toUpperCase())}
-            style={{
-              flex: '0 1 220px',
-              padding: '0.5rem 0.75rem',
-              borderRadius: '4px',
-              border: '1px solid #ddd',
-              fontSize: '0.875rem',
-              textTransform: 'uppercase',
-            }}
-          />
-          <button
-            onClick={() => {
-              void handleManualPairSubmit();
-            }}
-            disabled={manualPairLoading || !manualPairDeviceId.trim() || !manualPairCode.trim()}
-            style={{
-              padding: '0.5rem 1rem',
-              backgroundColor: manualPairLoading || !manualPairDeviceId.trim() || !manualPairCode.trim() ? '#ccc' : '#0070f3',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: manualPairLoading || !manualPairDeviceId.trim() || !manualPairCode.trim() ? 'not-allowed' : 'pointer',
-              fontSize: '0.875rem',
-            }}
-          >
-            {manualPairLoading ? 'Pairing...' : 'Pair Device'}
-          </button>
-        </div>
-      </section>
-
-      <section
-        style={{
-          marginTop: '1rem',
-          padding: '1rem',
-          background: 'white',
-          borderRadius: '8px',
-          border: '1px solid #e5e7eb',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Sessions</h2>
-            <p style={{ margin: '0.25rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
-              Active and recent browser sessions for this account
-            </p>
+            <div className="stack" style={{ gap: 10 }}>
+              <Badge>
+                <Terminal size={14} />
+                Admin / Legacy Tools
+              </Badge>
+              <h1 className="section-heading" style={{ fontSize: 'clamp(2rem, 4vw, 3.2rem)' }}>
+                Admin / Legacy Tools
+              </h1>
+              <p className="copy" style={{ maxWidth: 780 }}>
+                Migration fallback for debug access, older desktop builds, and legacy browser-driven controls.
+                This is the older browser surface for pairing, Create Run, screen preview, remote control, and
+                tool inspection.
+              </p>
+            </div>
           </div>
-          <button
-            onClick={() => {
-              void handleLogoutAll();
-            }}
-            style={{
-              padding: '0.45rem 0.8rem',
-              background: '#fff7ed',
-              border: '1px solid #fdba74',
-              borderRadius: '6px',
-              cursor: 'pointer',
-            }}
-          >
-            Logout All Sessions
-          </button>
-        </div>
 
-        {sessions.length === 0 ? (
-          <p style={{ marginTop: '0.75rem', color: '#6b7280', fontSize: '0.875rem' }}>No active sessions found.</p>
-        ) : (
-          <div style={{ display: 'grid', gap: '0.75rem', marginTop: '0.75rem' }}>
-            {sessions.map((session) => (
-              <div
-                key={session.id}
-                style={{
-                  padding: '0.75rem',
-                  borderRadius: '6px',
-                  border: '1px solid #e5e7eb',
-                  background: '#f9fafb',
+          <div className="stack" style={{ gap: 12, minWidth: 280 }}>
+            <div className="row-actions" style={{ justifyContent: 'flex-end' }}>
+              <Badge tone={sseConnected ? 'success' : 'warning'}>
+                <Activity size={14} />
+                {sseConnected ? 'Live Updates' : 'Reconnecting...'}
+              </Badge>
+            </div>
+            {userEmail ? <p className="small-note mono" style={{ textAlign: 'right' }}>{userEmail}</p> : null}
+            <div className="row-actions" style={{ justifyContent: 'flex-end' }}>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      await logout();
+                    } finally {
+                      router.push('/login');
+                    }
+                  })();
                 }}
               >
-                <div style={{ fontSize: '0.875rem', color: '#111827' }}>
-                  Created: {formatTime(new Date(session.createdAt).getTime())} • Last used: {formatTime(new Date(session.lastUsedAt).getTime())}
-                </div>
-                <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>
-                  Expires: {formatTime(new Date(session.expiresAt).getTime())}
-                  {session.revokedAt ? ` • Revoked: ${formatTime(new Date(session.revokedAt).getTime())}` : ''}
-                </div>
-                {session.userAgent && (
-                  <div style={{ fontSize: '0.8rem', color: '#6b7280', marginTop: '0.25rem' }}>
-                    {session.userAgent}
-                  </div>
-                )}
-              </div>
-            ))}
+                <LogOut size={16} />
+                Logout
+              </Button>
+            </div>
           </div>
-        )}
-      </section>
+        </div>
+      </Card>
 
-      <div style={{ display: 'grid', gridTemplateColumns: previewDeviceId ? '1fr 400px' : '1fr', gap: '2rem' }}>
-        <div>
-          {/* Devices Section */}
-          <section style={{ marginTop: '2rem' }}>
-            <h2>Devices</h2>
-            
-            {devices.length === 0 ? (
-              <p style={{ color: '#666' }}>No devices connected.</p>
-            ) : (
-              <div style={{ display: 'grid', gap: '1rem' }}>
-                {devices.map((device) => (
-                  <div
-                    key={device.deviceId}
-                    style={{
-                      padding: '1rem',
-                      background: 'white',
-                      borderRadius: '8px',
-                      border: '1px solid #e0e0e0',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
-                        <h3 style={{ margin: 0, fontSize: '1rem' }}>
-                          {device.deviceName || `Device-${device.deviceId.slice(0, 8)}`}
-                        </h3>
-                        <p style={{ margin: '0.25rem 0', color: '#666', fontSize: '0.875rem' }}>
-                          ID: <code>{device.deviceId}</code>
-                        </p>
-                        <p style={{ margin: '0.25rem 0', color: '#666', fontSize: '0.875rem' }}>
-                          Platform: {device.platform} • Last seen: {formatTime(device.lastSeenAt)}
-                        </p>
-                        {device.screenStreamState?.enabled && (
-                          <p style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#10b981' }}>
-                            📹 Screen sharing active ({device.screenStreamState.fps} FPS)
+      {error ? (
+        <div style={{ marginTop: 20 }}>
+          <Banner tone="danger">{error}</Banner>
+        </div>
+      ) : null}
+
+      {!hasActiveSubscription ? (
+        <div style={{ marginTop: 20 }}>
+          <Banner tone="warning">
+            <AlertCircle size={16} />
+            Remote execution requires an active subscription. Visit <Link href="/billing">/billing</Link> to
+            unlock browser-driven run creation and remote control.
+          </Banner>
+        </div>
+      ) : null}
+
+      <section className="legacy-layout" style={{ marginTop: 24 }}>
+        <div className="legacy-sidebar">
+          <Card>
+            <div className="stack" style={{ gap: 14 }}>
+              <div className="split">
+                <div>
+                  <p className="section-title" style={{ marginBottom: 0 }}>
+                    Nodes
+                  </p>
+                  <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                    Device Fleet
+                  </h2>
+                </div>
+                <Server size={20} color="rgba(255,255,255,0.44)" />
+              </div>
+
+              {devices.length === 0 ? (
+                <div className="empty-state">No connected devices yet.</div>
+              ) : (
+                <div className="stack" style={{ gap: 10 }}>
+                  {devices.map((device) => {
+                    const active = selectedDeviceId === device.deviceId;
+
+                    return (
+                      <button
+                        key={device.deviceId}
+                        type="button"
+                        onClick={() => setSelectedDeviceId(device.deviceId)}
+                        className="device-row"
+                        style={{
+                          textAlign: 'left',
+                          borderColor: active ? 'rgba(255,255,255,0.2)' : undefined,
+                          background: active ? 'rgba(255,255,255,0.06)' : undefined,
+                          padding: 14,
+                        }}
+                      >
+                        <div className="row-actions" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                          <p className="device-name" style={{ fontSize: 14 }}>
+                            {getDeviceName(device)}
                           </p>
-                        )}
-                        {/* Iteration 8: Workspace badge */}
-                        {device.workspaceState?.configured ? (
-                          <p style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#3b82f6' }}>
-                            📁 Workspace: {device.workspaceState.rootName}
-                          </p>
-                        ) : (
-                          <p style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#9ca3af' }}>
-                            📁 Workspace: Not configured
-                          </p>
-                        )}
-                      </div>
-                      
-                      <div style={{ display: 'flex', gap: '0.5rem', flexDirection: 'column', alignItems: 'flex-end' }}>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <StatusBadge
-                            label={device.connected ? 'Connected' : 'Offline'}
-                            color={device.connected ? '#10b981' : '#6b7280'}
-                          />
-                          <StatusBadge
-                            label={device.paired ? 'Paired' : 'Unpaired'}
-                            color={device.paired ? '#3b82f6' : '#f59e0b'}
-                          />
+                          <Badge tone={device.connected ? 'success' : 'warning'}>
+                            {device.connected ? 'Online' : 'Offline'}
+                          </Badge>
                         </div>
-                        {device.paired && device.screenStreamState?.enabled && (
-                          <button
-                            onClick={() => setPreviewDeviceId(device.deviceId)}
-                            style={{
-                              padding: '0.25rem 0.75rem',
-                              backgroundColor: previewDeviceId === device.deviceId ? '#10b981' : '#f3f4f6',
-                              color: previewDeviceId === device.deviceId ? 'white' : '#374151',
-                              border: 'none',
-                              borderRadius: '4px',
-                              fontSize: '0.75rem',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            {previewDeviceId === device.deviceId ? 'Viewing' : 'View Screen'}
-                          </button>
+                        <p className="small-note mono" style={{ marginTop: 8 }}>
+                          {device.platform} • {device.deviceId.slice(0, 10)}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </Card>
+
+          <Card>
+            <div className="stack" style={{ gap: 16 }}>
+              <div className="split">
+                <div>
+                  <p className="section-title" style={{ marginBottom: 0 }}>
+                    Pair a desktop device
+                  </p>
+                  <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                    Pair a desktop device
+                  </h2>
+                </div>
+                <Zap size={20} color="rgba(255,255,255,0.44)" />
+              </div>
+              <p className="copy">
+                If the desktop app shows a pairing code but has not appeared in the list yet, enter its device ID
+                and pairing code here.
+              </p>
+              <div>
+                <FieldLabel htmlFor="manual-device-id">Device ID</FieldLabel>
+                <TextInput
+                  id="manual-device-id"
+                  placeholder="Enter device ID"
+                  value={manualPairDeviceId}
+                  onChange={(event) => setManualPairDeviceId(event.target.value)}
+                />
+              </div>
+              <div>
+                <FieldLabel htmlFor="manual-pairing-code">Pairing code</FieldLabel>
+                <TextInput
+                  id="manual-pairing-code"
+                  placeholder="Enter pairing code"
+                  value={manualPairCode}
+                  onChange={(event) => setManualPairCode(event.target.value.toUpperCase())}
+                />
+              </div>
+              <Button
+                onClick={() => {
+                  void handleManualPairSubmit();
+                }}
+                loading={manualPairLoading}
+                disabled={!manualPairDeviceId.trim() || !manualPairCode.trim()}
+              >
+                Pair Device
+              </Button>
+            </div>
+          </Card>
+
+          <Card>
+            <div className="stack" style={{ gap: 16 }}>
+              <div className="split">
+                <div>
+                  <p className="section-title" style={{ marginBottom: 0 }}>
+                    Sessions
+                  </p>
+                  <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                    Sessions
+                  </h2>
+                </div>
+                <RefreshCcw size={20} color="rgba(255,255,255,0.44)" />
+              </div>
+
+              <Button variant="danger" onClick={() => void handleLogoutAll()}>
+                Logout All Sessions
+              </Button>
+
+              {sessions.length === 0 ? (
+                <div className="empty-state">No active sessions found.</div>
+              ) : (
+                <div className="session-list">
+                  {sessions.map((session) => (
+                    <div key={session.id} className="session-row">
+                      <p className="small-note mono">ID: {session.id}</p>
+                      <p className="small-note">Created: {formatDateTime(session.createdAt)}</p>
+                      <p className="small-note">Last used: {formatDateTime(session.lastUsedAt)}</p>
+                      <p className="small-note">Expires: {formatDateTime(session.expiresAt)}</p>
+                      {session.revokedAt ? <p className="small-note">Revoked: {formatDateTime(session.revokedAt)}</p> : null}
+                      {session.userAgent ? <p className="small-note">{session.userAgent}</p> : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
+        </div>
+
+        <div className="legacy-main">
+          <Card>
+            <div className="split">
+              <div className="stack" style={{ gap: 12 }}>
+                <div className="row-actions" style={{ alignItems: 'center', gap: 10 }}>
+                  <Badge tone={selectedDevice?.connected ? 'success' : 'warning'}>
+                    {selectedDevice?.connected ? 'Connected' : 'Offline'}
+                  </Badge>
+                  <Badge tone={selectedDevice?.paired ? 'success' : 'warning'}>
+                    {selectedDevice?.paired ? 'Paired' : 'Unpaired'}
+                  </Badge>
+                </div>
+                <h2 className="section-heading">{selectedDevice ? getDeviceName(selectedDevice) : 'Select a device'}</h2>
+                <p className="copy">
+                  {selectedDevice
+                    ? `${selectedDevice.platform} • ${selectedDevice.deviceId} • Last seen ${formatDateTime(selectedDevice.lastSeenAt)}`
+                    : 'Choose a device from the left rail to inspect live state, preview, and remote controls.'}
+                </p>
+              </div>
+
+              <div className="stack" style={{ gap: 10, minWidth: 220 }}>
+                {selectedDevice?.workspaceState?.configured ? (
+                  <Badge tone="success">Workspace: {selectedDevice.workspaceState.rootName || 'Configured'}</Badge>
+                ) : (
+                  <Badge tone="warning">Workspace: Not configured</Badge>
+                )}
+                {selectedDevice?.paired && selectedDevice.screenStreamState?.enabled ? (
+                  <Button
+                    variant={previewDeviceId === selectedDevice.deviceId ? 'secondary' : 'primary'}
+                    onClick={() => setPreviewDeviceId(previewDeviceId === selectedDevice.deviceId ? null : selectedDevice.deviceId)}
+                  >
+                    <Eye size={16} />
+                    {previewDeviceId === selectedDevice.deviceId ? 'Viewing' : 'View Screen'}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+
+            {!selectedDevice ? (
+              <div className="empty-state" style={{ marginTop: 20 }}>
+                Select a device to initialize the console view.
+              </div>
+            ) : !selectedDevice.paired && selectedDevice.pairingCode && selectedDevice.pairingExpiresAt ? (
+              <div style={{ marginTop: 20 }}>
+                <Banner tone="warning">
+                  Pairing code {selectedDevice.pairingCode} expires in {getTimeRemaining(selectedDevice.pairingExpiresAt)}.
+                </Banner>
+              </div>
+            ) : null}
+          </Card>
+
+          <Card>
+            <div className="split">
+              <div>
+                <p className="section-title" style={{ marginBottom: 0 }}>
+                  Live Preview
+                </p>
+                <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                  Live Preview
+                </h2>
+              </div>
+              {previewDevice ? (
+                <Badge tone={previewDevice.screenStreamState?.enabled ? 'success' : 'warning'}>
+                  <Monitor size={14} />
+                  {previewDevice.screenStreamState?.enabled ? 'Screen active' : 'Screen disabled'}
+                </Badge>
+              ) : (
+                <Badge tone="info">
+                  <Eye size={14} />
+                  Waiting for selection
+                </Badge>
+              )}
+            </div>
+
+            <div className="screen-frame" style={{ marginTop: 20 }}>
+              {previewDevice?.screenStreamState?.enabled ? (
+                <>
+                  <img
+                    src={buildApiUrl(`/devices/${previewDeviceId}/screen.png?ts=${screenTimestamp}`, {
+                      includeAccessTokenQuery: true,
+                    })}
+                    alt="Screen preview"
+                    onClick={previewCanControl ? handleImageClick : undefined}
+                    onWheel={previewCanControl ? handleWheel : undefined}
+                    title="Click to send action, scroll to scroll"
+                    style={{ cursor: previewCanControl ? 'crosshair' : 'not-allowed' }}
+                  />
+                  <div style={{ position: 'absolute', top: 18, right: 18 }}>
+                    <Badge tone="info">
+                      <MousePointer2 size={14} />
+                      {previewCanControl ? 'Control ready' : 'Preview only'}
+                    </Badge>
+                  </div>
+                </>
+              ) : (
+                <div className="screen-frame__empty">
+                  <div className="stack" style={{ gap: 10, textAlign: 'center' }}>
+                    <Eye size={22} style={{ margin: '0 auto', opacity: 0.6 }} />
+                    <p className="small-note">
+                      {previewDevice
+                        ? 'Screen preview is not enabled.'
+                        : 'Select a paired device with screen sharing enabled to open Live Preview.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {previewDevice ? (
+              <div className="control-stack" style={{ marginTop: 18 }}>
+                {previewDevice.controlState?.enabled ? (
+                  <Card subtle>
+                    <div className="stack" style={{ gap: 14 }}>
+                      <div className="row-actions" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div className="row-actions" style={{ alignItems: 'center', gap: 8 }}>
+                          <Keyboard size={16} />
+                          <p className="section-title" style={{ marginBottom: 0 }}>
+                            Remote Control
+                          </p>
+                        </div>
+                        <Badge tone={hasActiveSubscription ? 'success' : 'warning'}>
+                          {hasActiveSubscription ? 'Control enabled' : 'Billing required'}
+                        </Badge>
+                      </div>
+
+                      {!hasActiveSubscription ? (
+                        <Banner tone="warning">
+                          <CreditCard size={16} />
+                          Subscription required for remote control actions. Upgrade in <Link href="/billing">Billing</Link>.
+                        </Banner>
+                      ) : null}
+
+                      <div className="control-row">
+                        <TextInput
+                          value={typeText}
+                          onChange={(event) => setTypeText(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' && hasActiveSubscription) {
+                              handleTypeSubmit();
+                            }
+                          }}
+                          placeholder="Type text..."
+                          maxLength={500}
+                          disabled={!hasActiveSubscription}
+                        />
+                        <Button onClick={handleTypeSubmit} disabled={!hasActiveSubscription || !typeText.trim()}>
+                          Type
+                        </Button>
+                      </div>
+
+                      <div className="control-row">
+                        <Button variant="secondary" onClick={() => handleHotkey('return')} disabled={!hasActiveSubscription}>
+                          Enter
+                        </Button>
+                        <Button variant="secondary" onClick={() => handleHotkey('tab')} disabled={!hasActiveSubscription}>
+                          Tab
+                        </Button>
+                        <Button variant="secondary" onClick={() => handleHotkey('escape')} disabled={!hasActiveSubscription}>
+                          Esc
+                        </Button>
+                        <Button variant="secondary" onClick={() => handleHotkey('up')} disabled={!hasActiveSubscription}>
+                          <ArrowUp size={16} />
+                          ↑
+                        </Button>
+                        <Button variant="secondary" onClick={() => handleHotkey('down')} disabled={!hasActiveSubscription}>
+                          <ArrowDown size={16} />
+                          ↓
+                        </Button>
+                        <Button variant="secondary" onClick={() => handleHotkey('left')} disabled={!hasActiveSubscription}>
+                          <ArrowLeft size={16} />
+                          ←
+                        </Button>
+                        <Button variant="secondary" onClick={() => handleHotkey('right')} disabled={!hasActiveSubscription}>
+                          <ArrowRight size={16} />
+                          →
+                        </Button>
+                      </div>
+
+                      <div className="stack" style={{ gap: 10 }}>
+                        <p className="section-title" style={{ marginBottom: 0 }}>
+                          Recent Actions
+                        </p>
+                        {actions.length === 0 ? (
+                          <div className="empty-state">No recent actions yet.</div>
+                        ) : (
+                          <div className="stack" style={{ gap: 8 }}>
+                            {actions.slice(0, 5).map((action) => (
+                              <div key={action.actionId} className="tool-row" style={{ padding: 14 }}>
+                                <div className="row-actions" style={{ justifyContent: 'space-between', gap: 10 }}>
+                                  <p className="small-note">{summarizeAction(action.action)}</p>
+                                  <Badge tone={getStatusTone(action.status)}>{action.status}</Badge>
+                                </div>
+                                <p className="small-note mono" style={{ marginTop: 8 }}>
+                                  {formatClockTime(action.updatedAt)}
+                                  {action.source ? ` • ${action.source}` : ''}
+                                  {action.runId ? ` • ${action.runId.slice(0, 8)}` : ''}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     </div>
+                  </Card>
+                ) : (
+                  <Banner tone="warning" style={{ marginTop: 4 }}>
+                    Remote control is disabled. Ask the user to enable Allow Control on the desktop app.
+                  </Banner>
+                )}
 
-                    {!device.paired && device.pairingCode && device.pairingExpiresAt && (
-                      <div
-                        style={{
-                          marginTop: '1rem',
-                          padding: '0.75rem',
-                          background: '#fef3c7',
-                          borderRadius: '6px',
-                          fontSize: '0.875rem',
-                        }}
-                      >
-                        <strong>Pairing Code:</strong> {device.pairingCode}
-                        <span style={{ color: '#666', marginLeft: '0.5rem' }}>
-                          (expires in {getTimeRemaining(device.pairingExpiresAt)})
-                        </span>
+                {screenMeta ? (
+                  <div className="row-actions" style={{ gap: 18, alignItems: 'center' }}>
+                    <p className="small-note mono">Resolution: {screenMeta.width}×{screenMeta.height}</p>
+                    <p className="small-note mono">Size: {(screenMeta.byteLength / 1024).toFixed(1)} KB</p>
+                    <p className="small-note mono">Updated: {formatClockTime(screenMeta.at)}</p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </Card>
+
+          <Card>
+            <div className="split">
+              <div>
+                <p className="section-title" style={{ marginBottom: 0 }}>
+                  Devices
+                </p>
+                <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                  Devices
+                </h2>
+              </div>
+              <Button variant="secondary" onClick={() => void fetchInitialData()}>
+                <RefreshCcw size={16} />
+                Refresh
+              </Button>
+            </div>
+
+            {devices.length === 0 ? (
+              <div className="empty-state" style={{ marginTop: 20 }}>
+                No devices connected.
+              </div>
+            ) : (
+              <div className="device-list" style={{ marginTop: 20 }}>
+                {devices.map((device) => (
+                  <div key={device.deviceId} className="device-row">
+                    <div className="device-row__header">
+                      <div className="stack" style={{ gap: 8 }}>
+                        <div className="row-actions" style={{ alignItems: 'center', gap: 10 }}>
+                          <p className="device-name">{getDeviceName(device)}</p>
+                          <Badge tone={device.connected ? 'success' : 'warning'}>
+                            {device.connected ? 'Connected' : 'Offline'}
+                          </Badge>
+                          <Badge tone={device.paired ? 'success' : 'warning'}>
+                            {device.paired ? 'Paired' : 'Unpaired'}
+                          </Badge>
+                        </div>
+                        <p className="device-meta mono">
+                          {device.deviceId} • {device.platform} • Last seen {formatDateTime(device.lastSeenAt)}
+                        </p>
+                        <p className="device-meta">
+                          Workspace: {device.workspaceState?.configured ? device.workspaceState.rootName || 'Configured' : 'Not configured'}
+                        </p>
+                        {device.screenStreamState?.enabled ? (
+                          <p className="device-meta">Screen sharing enabled at {device.screenStreamState.fps} FPS.</p>
+                        ) : null}
                       </div>
-                    )}
 
-                    {!device.paired && (
-                      <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem' }}>
-                        <input
-                          type="text"
+                      <div className="stack" style={{ gap: 10, minWidth: 180 }}>
+                        {device.paired && device.screenStreamState?.enabled ? (
+                          <Button
+                            variant={previewDeviceId === device.deviceId ? 'secondary' : 'primary'}
+                            onClick={() => setPreviewDeviceId(previewDeviceId === device.deviceId ? null : device.deviceId)}
+                          >
+                            <Eye size={16} />
+                            {previewDeviceId === device.deviceId ? 'Viewing' : 'View Screen'}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {!device.paired && device.pairingCode && device.pairingExpiresAt ? (
+                      <div style={{ marginTop: 18 }}>
+                        <Banner tone="warning">
+                          Pairing Code: {device.pairingCode} (expires in {getTimeRemaining(device.pairingExpiresAt)})
+                        </Banner>
+                      </div>
+                    ) : null}
+
+                    {!device.paired ? (
+                      <div className="control-row" style={{ marginTop: 18 }}>
+                        <TextInput
                           placeholder="Enter pairing code"
                           value={pairingInputs[device.deviceId] || ''}
-                          onChange={(e) =>
+                          onChange={(event) =>
                             setPairingInputs((prev) => ({
                               ...prev,
-                              [device.deviceId]: e.target.value,
+                              [device.deviceId]: event.target.value.toUpperCase(),
                             }))
                           }
-                          style={{
-                            padding: '0.5rem 0.75rem',
-                            borderRadius: '4px',
-                            border: '1px solid #ddd',
-                            fontSize: '0.875rem',
-                            textTransform: 'uppercase',
-                          }}
                         />
-                        <button
-                          onClick={() => handlePairSubmit(device.deviceId)}
-                          disabled={pairingLoading[device.deviceId] || !pairingInputs[device.deviceId]?.trim()}
-                          style={{
-                            padding: '0.5rem 1rem',
-                            backgroundColor: '#0070f3',
-                            color: 'white',
-                            border: 'none',
-                            borderRadius: '4px',
-                            cursor: 'pointer',
-                            fontSize: '0.875rem',
-                          }}
+                        <Button
+                          onClick={() => void handlePairSubmit(device.deviceId)}
+                          loading={Boolean(pairingLoading[device.deviceId])}
+                          disabled={!pairingInputs[device.deviceId]?.trim()}
                         >
-                          {pairingLoading[device.deviceId] ? 'Pairing...' : 'Pair'}
-                        </button>
+                          Pair
+                        </Button>
                       </div>
-                    )}
+                    ) : null}
                   </div>
                 ))}
               </div>
             )}
-          </section>
+          </Card>
+        </div>
 
-          {/* Create Run Section */}
-          {pairedDevices.length > 0 && (
-            <section style={{ marginTop: '2rem', padding: '1rem', background: '#f9fafb', borderRadius: '8px' }}>
-              <h2 style={{ marginTop: 0 }}>Create Run</h2>
-              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+        <div className="legacy-rail">
+          <Card>
+            <div className="stack" style={{ gap: 16 }}>
+              <div className="split">
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
-                    Device
-                  </label>
-                  <select
-                    value={selectedDeviceId}
-                    onChange={(e) => setSelectedDeviceId(e.target.value)}
-                    disabled={!hasActiveSubscription}
-                    style={{
-                      padding: '0.5rem',
-                      borderRadius: '4px',
-                      border: '1px solid #ddd',
-                      fontSize: '0.875rem',
-                    }}
-                  >
-                    <option value="">Select device</option>
-                    {pairedDevices.map((d) => (
-                      <option key={d.deviceId} value={d.deviceId}>
-                        {d.deviceName || d.deviceId.slice(0, 8)}
-                      </option>
-                    ))}
-                  </select>
+                  <p className="section-title" style={{ marginBottom: 0 }}>
+                    Create Run
+                  </p>
+                  <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                    Create Run
+                  </h2>
                 </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
-                    Mode
-                  </label>
-                  <select
-                    value={selectedRunMode}
-                    onChange={(e) => setSelectedRunMode(e.target.value as 'manual' | 'ai_assist')}
-                    disabled={!hasActiveSubscription}
-                    style={{
-                      padding: '0.5rem',
-                      borderRadius: '4px',
-                      border: '1px solid #ddd',
-                      fontSize: '0.875rem',
-                    }}
-                  >
-                    <option value="manual">Manual</option>
-                    <option value="ai_assist">🤖 AI Assist</option>
-                  </select>
-                </div>
-                <div style={{ flex: 1, minWidth: '200px' }}>
-                  <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
-                    Goal
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g., Open Chrome and search for..."
-                    value={newRunGoal}
-                    onChange={(e) => setNewRunGoal(e.target.value)}
-                    disabled={!hasActiveSubscription}
-                    style={{
-                      width: '100%',
-                      padding: '0.5rem',
-                      borderRadius: '4px',
-                      border: '1px solid #ddd',
-                      fontSize: '0.875rem',
-                    }}
-                  />
-                </div>
-                <button
-                  onClick={handleCreateRun}
-                  disabled={!hasActiveSubscription || !selectedDeviceId || !newRunGoal.trim()}
-                  style={{
-                    padding: '0.5rem 1rem',
-                    backgroundColor: hasActiveSubscription && selectedDeviceId && newRunGoal.trim() ? '#10b981' : '#ccc',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: hasActiveSubscription && selectedDeviceId && newRunGoal.trim() ? 'pointer' : 'not-allowed',
-                    fontSize: '0.875rem',
-                  }}
-                >
-                  Create Run
-                </button>
+                <Play size={20} color="rgba(255,255,255,0.44)" />
               </div>
-              {selectedRunMode === 'ai_assist' && (
-                <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem', color: '#8b5cf6' }}>
-                  🤖 AI Assist: The AI will analyze the screen and propose actions one at a time.
-                  Every action requires explicit user approval on the desktop.
-                </p>
-              )}
-            </section>
-          )}
 
-          {/* Runs Section */}
-          <section style={{ marginTop: '2rem' }}>
-            <h2>Runs ({runs.length})</h2>
-            
-            {runs.length === 0 ? (
-              <p style={{ color: '#666' }}>No runs yet.</p>
-            ) : (
-              <div style={{ display: 'grid', gap: '0.75rem' }}>
-                {runs.slice().reverse().map((run) => (
-                  <div
-                    key={run.runId}
-                    style={{
-                      padding: '1rem',
-                      background: 'white',
-                      borderRadius: '8px',
-                      border: '1px solid #e0e0e0',
-                    }}
+              {pairedDevices.length === 0 ? (
+                <div className="empty-state">Pair a desktop before creating a run.</div>
+              ) : (
+                <>
+                  <div>
+                    <FieldLabel htmlFor="run-device">Device</FieldLabel>
+                    <Select
+                      id="run-device"
+                      value={selectedDeviceId}
+                      onChange={(event) => setSelectedDeviceId(event.target.value)}
+                      disabled={!hasActiveSubscription}
+                    >
+                      <option value="">Select device</option>
+                      {pairedDevices.map((device) => (
+                        <option key={device.deviceId} value={device.deviceId}>
+                          {getDeviceName(device)}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+
+                  <div>
+                    <FieldLabel htmlFor="run-mode">Mode</FieldLabel>
+                    <Select
+                      id="run-mode"
+                      value={selectedRunMode}
+                      onChange={(event) => setSelectedRunMode(event.target.value as 'manual' | 'ai_assist')}
+                      disabled={!hasActiveSubscription}
+                    >
+                      <option value="manual">manual</option>
+                      <option value="ai_assist">ai_assist</option>
+                    </Select>
+                  </div>
+
+                  <div>
+                    <FieldLabel htmlFor="run-goal">Goal</FieldLabel>
+                    <TextArea
+                      id="run-goal"
+                      placeholder="Define target objective..."
+                      value={newRunGoal}
+                      onChange={(event) => setNewRunGoal(event.target.value)}
+                      disabled={!hasActiveSubscription}
+                    />
+                  </div>
+
+                  {selectedRunMode === 'ai_assist' ? (
+                    <p className="small-note">
+                      AI Assist proposes actions and tools one step at a time. Every privileged step still requires
+                      explicit desktop approval.
+                    </p>
+                  ) : null}
+
+                  <Button
+                    onClick={() => void handleCreateRun()}
+                    disabled={!hasActiveSubscription || !selectedDeviceId || !newRunGoal.trim()}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
-                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.25rem' }}>
-                          <p style={{ margin: 0, fontWeight: 500 }}>{run.goal}</p>
-                          {run.mode === 'ai_assist' && (
-                            <span
-                              style={{
-                                padding: '0.125rem 0.5rem',
-                                backgroundColor: '#8b5cf620',
-                                color: '#8b5cf6',
-                                borderRadius: '9999px',
-                                fontSize: '0.625rem',
-                                fontWeight: 600,
-                              }}
-                            >
-                              AI ASSIST
-                            </span>
-                          )}
+                    <Play size={16} />
+                    Create Run
+                  </Button>
+                </>
+              )}
+            </div>
+          </Card>
+
+          <Card>
+            <div className="stack" style={{ gap: 16 }}>
+              <div className="split">
+                <div>
+                  <p className="section-title" style={{ marginBottom: 0 }}>
+                    Active Routines
+                  </p>
+                  <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                    Runs
+                  </h2>
+                </div>
+                <Badge tone="info">
+                  <Activity size={14} />
+                  {visibleRuns.length}
+                </Badge>
+              </div>
+
+              {visibleRuns.length === 0 ? (
+                <div className="empty-state">No runs yet.</div>
+              ) : (
+                <div className="run-list">
+                  {visibleRuns.map((run) => (
+                    <div key={run.runId} className="run-row">
+                      <div className="run-row__header">
+                        <div className="stack" style={{ gap: 8 }}>
+                          <div className="row-actions" style={{ gap: 10, alignItems: 'center' }}>
+                            <p className="run-title">{run.goal}</p>
+                            {run.mode === 'ai_assist' ? <Badge tone="info">AI Assist</Badge> : <Badge tone="warning">Manual</Badge>}
+                          </div>
+                          <p className="run-meta mono">
+                            {run.runId} • {run.deviceId} • Created {formatDateTime(run.createdAt)}
+                          </p>
+                          {run.constraints ? (
+                            <p className="run-meta">
+                              Actions: {run.actionCount || 0}/{run.constraints.maxActions} • Max runtime {run.constraints.maxRuntimeMinutes} min
+                            </p>
+                          ) : null}
+                          {(run.steps || []).length > 0 ? (
+                            <p className="run-meta">
+                              Progress: {getCompletedStepsCount(run)}/{(run.steps || []).length} steps
+                            </p>
+                          ) : null}
                         </div>
-                        <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-                          ID: {run.runId.slice(0, 8)}... • Device: {run.deviceId.slice(0, 8)}... • 
-                          Created: {formatTime(run.createdAt)}
-                        </p>
-                        {run.mode === 'ai_assist' && run.constraints && (
-                          <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-                            Actions: {run.actionCount || 0} / {run.constraints.maxActions} • 
-                            Max runtime: {run.constraints.maxRuntimeMinutes} min
-                          </p>
-                        )}
-                        {run.steps.length > 0 && (
-                          <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-                            Progress: {getCompletedStepsCount(run)}/{run.steps.length} steps
-                          </p>
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <StatusBadge
-                          label={run.status}
-                          color={
-                            run.status === 'done'
-                              ? '#10b981'
-                              : run.status === 'failed'
-                              ? '#ef4444'
-                              : run.status === 'canceled'
-                              ? '#6b7280'
-                              : run.status === 'running'
-                              ? '#3b82f6'
-                              : run.status === 'waiting_for_user'
-                              ? '#8b5cf6'
-                              : '#f59e0b'
-                          }
-                        />
-                        {(run.status === 'queued' || run.status === 'running' || run.status === 'waiting_for_user') && (
-                          <button
-                            onClick={() => handleCancelRun(run.runId)}
-                            style={{
-                              padding: '0.25rem 0.5rem',
-                              backgroundColor: '#fee2e2',
-                              color: '#dc2626',
-                              border: 'none',
-                              borderRadius: '4px',
-                              fontSize: '0.75rem',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Cancel
-                          </button>
-                        )}
-                        <button
-                          onClick={() => handleSelectRunTools(run.runId)}
-                          style={{
-                            padding: '0.25rem 0.5rem',
-                            backgroundColor: selectedRunId === run.runId ? '#dbeafe' : '#f3f4f6',
-                            color: selectedRunId === run.runId ? '#1d4ed8' : '#374151',
-                            border: 'none',
-                            borderRadius: '4px',
-                            fontSize: '0.75rem',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Tools
-                        </button>
-                      </div>
-                    </div>
 
-                    {/* AI Assist: Latest Proposal */}
-                    {run.mode === 'ai_assist' && run.latestProposal && (
-                      <div
-                        style={{
-                          marginTop: '0.75rem',
-                          padding: '0.75rem',
-                          background: '#fef3c7',
-                          borderRadius: '6px',
-                          fontSize: '0.875rem',
-                        }}
-                      >
-                        <strong style={{ color: '#92400e' }}>🤖 Latest AI Proposal:</strong>
-                        {run.latestProposal.kind === 'propose_action' && (
-                          <div style={{ marginTop: '0.25rem' }}>
-                            <div style={{ color: '#78350f' }}>
-                              Action: {summarizeAction(run.latestProposal.action)}
-                            </div>
-                            <div style={{ color: '#92400e', fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                              {run.latestProposal.rationale}
-                            </div>
-                            {run.latestProposal.confidence !== undefined && (
-                              <div style={{ color: '#92400e', fontSize: '0.75rem' }}>
-                                Confidence: {Math.round(run.latestProposal.confidence * 100)}%
+                        <div className="stack" style={{ gap: 10, minWidth: 140 }}>
+                          <Badge tone={getStatusTone(run.status)}>{run.status}</Badge>
+                          <div className="row-actions">
+                            <Button variant="ghost" onClick={() => void handleSelectRunTools(run.runId)}>
+                              Tools
+                            </Button>
+                            {run.status === 'queued' || run.status === 'running' || run.status === 'waiting_for_user' ? (
+                              <Button variant="danger" onClick={() => void handleCancelRun(run.runId)}>
+                                <Square size={16} />
+                                Cancel
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+
+                      {run.latestProposal ? (
+                        <div className="tool-row" style={{ marginTop: 16 }}>
+                          <div className="row-actions" style={{ marginBottom: 8 }}>
+                            <Badge tone="warning">Latest AI Proposal</Badge>
+                          </div>
+                          {renderLatestProposal(run.latestProposal)}
+                        </div>
+                      ) : null}
+
+                      {runTools[run.runId]?.length ? (
+                        <div className="tool-list" style={{ marginTop: 16 }}>
+                          {runTools[run.runId].slice(0, 4).map((tool) => (
+                            <div key={tool.toolEventId} className="tool-row" style={{ padding: 14 }}>
+                              <div className="row-actions" style={{ justifyContent: 'space-between', gap: 10 }}>
+                                <p className="small-note">
+                                  {tool.tool}
+                                  {tool.pathRel ? ` → ${tool.pathRel}` : ''}
+                                  {tool.cmd ? ` → ${tool.cmd}` : ''}
+                                </p>
+                                <Badge tone={getStatusTone(tool.status)}>{tool.status}</Badge>
                               </div>
-                            )}
-                          </div>
-                        )}
-                        {run.latestProposal.kind === 'propose_tool' && (
-                          <div style={{ marginTop: '0.25rem' }}>
-                            <div style={{ color: '#78350f' }}>
-                              Tool: {run.latestProposal.toolCall.tool}
-                              {run.latestProposal.toolCall.tool.startsWith('fs.') && (
-                                <span> → {run.latestProposal.toolCall.path}</span>
-                              )}
-                              {run.latestProposal.toolCall.tool === 'terminal.exec' && (
-                                <span> → {run.latestProposal.toolCall.cmd}</span>
-                              )}
-                            </div>
-                            <div style={{ color: '#92400e', fontSize: '0.75rem', marginTop: '0.25rem' }}>
-                              {run.latestProposal.rationale}
-                            </div>
-                          </div>
-                        )}
-                        {run.latestProposal.kind === 'ask_user' && (
-                          <div style={{ marginTop: '0.25rem', color: '#78350f' }}>
-                            ❓ {run.latestProposal.question}
-                          </div>
-                        )}
-                        {run.latestProposal.kind === 'done' && (
-                          <div style={{ marginTop: '0.25rem', color: '#166534' }}>
-                            ✅ {run.latestProposal.summary}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Iteration 8: Tool Timeline */}
-                    {runTools[run.runId] && runTools[run.runId].length > 0 && (
-                      <div
-                        style={{
-                          marginTop: '0.75rem',
-                          padding: '0.75rem',
-                          background: '#f3f4f6',
-                          borderRadius: '6px',
-                          fontSize: '0.75rem',
-                        }}
-                      >
-                        <strong style={{ color: '#374151' }}>🛠️ Tool Timeline:</strong>
-                        <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.375rem' }}>
-                          {runTools[run.runId].slice(0, 10).map((tool) => (
-                            <div
-                              key={tool.toolEventId}
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.5rem',
-                                padding: '0.25rem 0.5rem',
-                                background: 'white',
-                                borderRadius: '4px',
-                              }}
-                            >
-                              <span
-                                style={{
-                                  width: '8px',
-                                  height: '8px',
-                                  borderRadius: '50%',
-                                  backgroundColor:
-                                    tool.status === 'executed'
-                                      ? '#10b981'
-                                      : tool.status === 'failed'
-                                      ? '#ef4444'
-                                      : '#f59e0b',
-                                }}
-                              />
-                              <span style={{ flex: 1 }}>
-                                {tool.tool}
-                                {tool.pathRel && <span style={{ color: '#6b7280' }}> → {tool.pathRel}</span>}
-                                {tool.cmd && <span style={{ color: '#6b7280' }}> → {tool.cmd}</span>}
-                              </span>
-                              <span
-                                style={{
-                                  padding: '0.125rem 0.375rem',
-                                  backgroundColor: `${
-                                    tool.status === 'executed'
-                                      ? '#10b981'
-                                      : tool.status === 'failed'
-                                      ? '#ef4444'
-                                      : '#f59e0b'
-                                  }20`,
-                                  color:
-                                    tool.status === 'executed'
-                                      ? '#10b981'
-                                      : tool.status === 'failed'
-                                      ? '#ef4444'
-                                      : '#f59e0b',
-                                  borderRadius: '4px',
-                                  fontSize: '0.625rem',
-                                  textTransform: 'uppercase',
-                                }}
-                              >
-                                {tool.status}
-                              </span>
-                              {tool.exitCode !== undefined && (
-                                <span style={{ color: '#6b7280' }}>exit:{tool.exitCode}</span>
-                              )}
-                              {tool.errorCode && (
-                                <span style={{ color: '#ef4444' }}>err:{tool.errorCode}</span>
-                              )}
+                              <p className="small-note mono" style={{ marginTop: 8 }}>
+                                {formatClockTime(tool.at)}
+                                {tool.exitCode !== undefined ? ` • exit:${tool.exitCode}` : ''}
+                                {tool.errorCode ? ` • err:${tool.errorCode}` : ''}
+                              </p>
                             </div>
                           ))}
-                          {runTools[run.runId].length > 10 && (
-                            <div style={{ textAlign: 'center', color: '#9ca3af', fontSize: '0.625rem' }}>
-                              +{runTools[run.runId].length - 10} more tools
-                            </div>
-                          )}
                         </div>
-                      </div>
-                    )}
+                      ) : null}
 
-                    {run.steps.length > 0 && (
-                      <div style={{ marginTop: '0.75rem' }}>
-                        <div
-                          style={{
-                            height: '4px',
-                            backgroundColor: '#e5e7eb',
-                            borderRadius: '2px',
-                            overflow: 'hidden',
-                          }}
-                        >
+                      {(run.steps || []).length > 0 ? (
+                        <div style={{ marginTop: 16, height: 4, borderRadius: 999, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
                           <div
                             style={{
                               height: '100%',
-                              backgroundColor:
-                                run.status === 'done'
-                                  ? '#10b981'
-                                  : run.status === 'failed' || run.status === 'canceled'
-                                  ? '#ef4444'
-                                  : '#3b82f6',
-                              width: `${(getCompletedStepsCount(run) / run.steps.length) * 100}%`,
-                              transition: 'width 0.3s ease',
+                              width: `${(getCompletedStepsCount(run) / Math.max((run.steps || []).length, 1)) * 100}%`,
+                              background: run.status === 'done' ? '#34d399' : run.status === 'failed' || run.status === 'canceled' ? '#f87171' : '#f4f4f5',
                             }}
                           />
                         </div>
-                      </div>
-                    )}
+                      ) : null}
 
-                    {run.reason && (
-                      <div
-                        style={{
-                          marginTop: '0.75rem',
-                          padding: '0.5rem',
-                          backgroundColor: run.status === 'canceled' ? '#f3f4f6' : '#fee2e2',
-                          borderRadius: '4px',
-                          fontSize: '0.75rem',
-                          color: run.status === 'canceled' ? '#374151' : '#dc2626',
-                        }}
-                      >
-                        {run.reason}
-                      </div>
-                    )}
+                      {run.reason ? (
+                        <Banner tone={run.status === 'canceled' ? 'warning' : 'danger'} style={{ marginTop: 16 }}>
+                          {run.reason}
+                        </Banner>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
+
+          {selectedRunId ? (
+            <Card>
+              <div className="stack" style={{ gap: 16 }}>
+                <div className="split">
+                  <div>
+                    <p className="section-title" style={{ marginBottom: 0 }}>
+                      Tools
+                    </p>
+                    <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                      Tools
+                    </h2>
                   </div>
-                ))}
-              </div>
-            )}
-          </section>
+                  <Button variant="ghost" onClick={() => setSelectedRunId(null)}>
+                    <X size={16} />
+                    Close
+                  </Button>
+                </div>
+                <p className="small-note mono">Run: {selectedRunId}</p>
 
-          {selectedRunId && (
-            <section style={{ marginTop: '2rem' }}>
-              <h2>Tools</h2>
-              <div
-                style={{
-                  padding: '1rem',
-                  background: 'white',
-                  borderRadius: '8px',
-                  border: '1px solid #e0e0e0',
-                }}
-              >
-                <p style={{ margin: '0 0 0.75rem', fontSize: '0.75rem', color: '#6b7280' }}>
-                  Run: {selectedRunId.slice(0, 8)}...
-                </p>
                 {runTools[selectedRunId]?.length ? (
-                  <div style={{ display: 'grid', gap: '0.5rem' }}>
+                  <div className="tool-list">
                     {runTools[selectedRunId].map((tool) => (
-                      <div
-                        key={tool.toolEventId}
-                        style={{
-                          padding: '0.75rem',
-                          borderRadius: '6px',
-                          background: '#f9fafb',
-                          border: '1px solid #e5e7eb',
-                          fontSize: '0.75rem',
-                        }}
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem' }}>
-                          <span style={{ fontWeight: 600 }}>
+                      <div key={tool.toolEventId} className="tool-row">
+                        <div className="row-actions" style={{ justifyContent: 'space-between', gap: 10 }}>
+                          <p className="small-note">
                             {tool.tool}
-                            {tool.pathRel && <span style={{ color: '#6b7280' }}> • {tool.pathRel}</span>}
-                            {tool.cmd && <span style={{ color: '#6b7280' }}> • {tool.cmd}</span>}
-                          </span>
-                          <StatusBadge
-                            label={tool.status}
-                            color={
-                              tool.status === 'executed'
-                                ? '#10b981'
-                                : tool.status === 'failed'
-                                ? '#ef4444'
-                                : tool.status === 'denied'
-                                ? '#6b7280'
-                                : '#f59e0b'
-                            }
-                          />
+                            {tool.pathRel ? ` • ${tool.pathRel}` : ''}
+                            {tool.cmd ? ` • ${tool.cmd}` : ''}
+                          </p>
+                          <Badge tone={getStatusTone(tool.status)}>{tool.status}</Badge>
                         </div>
-                        <div style={{ marginTop: '0.375rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', color: '#6b7280' }}>
-                          <span>{formatTime(tool.at)}</span>
-                          {tool.exitCode !== undefined && <span>exit:{tool.exitCode}</span>}
-                          {tool.truncated !== undefined && <span>truncated:{tool.truncated ? 'yes' : 'no'}</span>}
-                          {tool.errorCode && <span style={{ color: '#dc2626' }}>err:{tool.errorCode}</span>}
-                        </div>
+                        <p className="small-note mono" style={{ marginTop: 8 }}>
+                          {formatClockTime(tool.at)}
+                          {tool.exitCode !== undefined ? ` • exit:${tool.exitCode}` : ''}
+                          {tool.truncated !== undefined ? ` • truncated:${tool.truncated ? 'yes' : 'no'}` : ''}
+                          {tool.errorCode ? ` • err:${tool.errorCode}` : ''}
+                        </p>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <p style={{ margin: 0, color: '#6b7280', fontSize: '0.875rem' }}>
-                    No tool events yet for this run.
+                  <div className="empty-state">No tool events yet for this run.</div>
+                )}
+              </div>
+            </Card>
+          ) : null}
+
+          <Card>
+            <div className="stack" style={{ gap: 16 }}>
+              <div className="split">
+                <div>
+                  <p className="section-title" style={{ marginBottom: 0 }}>
+                    Telemetry
                   </p>
-                )}
+                  <h2 className="section-heading" style={{ fontSize: 22, marginTop: 10 }}>
+                    Telemetry
+                  </h2>
+                </div>
+                <Terminal size={20} color="rgba(255,255,255,0.44)" />
               </div>
-            </section>
-          )}
-        </div>
-
-        {/* Screen Preview Panel */}
-        {previewDeviceId && (
-          <div
-            style={{
-              position: 'sticky',
-              top: '2rem',
-              height: 'fit-content',
-              background: 'white',
-              borderRadius: '8px',
-              border: '1px solid #e0e0e0',
-              padding: '1rem',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3 style={{ margin: 0, fontSize: '1rem' }}>Live Preview</h3>
-              <button
-                onClick={() => setPreviewDeviceId(null)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  fontSize: '1.25rem',
-                  cursor: 'pointer',
-                  color: '#666',
-                }}
-              >
-                ×
-              </button>
-            </div>
-
-            {previewDevice?.screenStreamState?.enabled ? (
-              <div>
-                <img
-                  src={buildApiUrl(`/devices/${previewDeviceId}/screen.png?ts=${screenTimestamp}`, {
-                    includeAccessTokenQuery: true,
-                  })}
-                  alt="Screen preview"
-                  onClick={hasActiveSubscription ? handleImageClick : undefined}
-                  onWheel={hasActiveSubscription ? handleWheel : undefined}
-                  title="Click to send action, scroll to scroll"
-                  style={{
-                    width: '100%',
-                    borderRadius: '4px',
-                    border: '1px solid #e0e0e0',
-                    cursor: previewDevice?.controlState?.enabled && hasActiveSubscription ? 'crosshair' : 'not-allowed',
-                  }}
-                />
-                
-                {/* Control Panel */}
-                {previewDevice?.controlState?.enabled ? (
-                  <div style={{ marginTop: '1rem', padding: '1rem', background: '#f0fdf4', borderRadius: '4px', border: '1px solid #86efac' }}>
-                    <div style={{ fontSize: '0.875rem', fontWeight: 600, color: '#166534', marginBottom: '0.75rem' }}>
-                      🎮 Remote Control Active
-                    </div>
-                    {!hasActiveSubscription && (
-                      <div style={{ marginBottom: '0.75rem', fontSize: '0.8rem', color: '#9a3412' }}>
-                        Subscription required for remote control actions. <Link href="/billing">Upgrade in Billing</Link>.
-                      </div>
-                    )}
-                    
-                    {/* Type Input */}
-                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                      <input
-                        type="text"
-                        value={typeText}
-                        onChange={(e) => setTypeText(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && hasActiveSubscription) {
-                            handleTypeSubmit();
-                          }
-                        }}
-                        placeholder="Type text..."
-                        maxLength={500}
-                        disabled={!hasActiveSubscription}
-                        style={{
-                          flex: 1,
-                          padding: '0.5rem',
-                          borderRadius: '4px',
-                          border: '1px solid #d1d5db',
-                          fontSize: '0.875rem',
-                        }}
-                      />
-                      <button
-                        onClick={handleTypeSubmit}
-                        disabled={!hasActiveSubscription || !typeText.trim()}
-                        style={{
-                          padding: '0.5rem 1rem',
-                          borderRadius: '4px',
-                          border: 'none',
-                          background: hasActiveSubscription && typeText.trim() ? '#16a34a' : '#9ca3af',
-                          color: 'white',
-                          cursor: hasActiveSubscription && typeText.trim() ? 'pointer' : 'not-allowed',
-                          fontSize: '0.875rem',
-                        }}
-                      >
-                        Type
-                      </button>
-                    </div>
-
-                    {/* Hotkey Buttons */}
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                      <button onClick={() => handleHotkey('return')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>Enter</button>
-                      <button onClick={() => handleHotkey('tab')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>Tab</button>
-                      <button onClick={() => handleHotkey('escape')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>Esc</button>
-                      <button onClick={() => handleHotkey('up')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>↑</button>
-                      <button onClick={() => handleHotkey('down')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>↓</button>
-                      <button onClick={() => handleHotkey('left')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>←</button>
-                      <button onClick={() => handleHotkey('right')} style={hotkeyBtnStyle} disabled={!hasActiveSubscription}>→</button>
-                    </div>
-
-                    {/* Actions Log */}
-                    {actions.length > 0 && (
-                      <div style={{ marginTop: '0.75rem', fontSize: '0.75rem' }}>
-                        <div style={{ color: '#6b7280', marginBottom: '0.25rem' }}>Recent Actions:</div>
-                        <div style={{ maxHeight: '100px', overflow: 'auto' }}>
-                          {actions.slice(-5).map((a) => (
-                            <div key={a.actionId} style={{ display: 'flex', gap: '0.5rem', color: '#374151' }}>
-                              <span style={{ textTransform: 'capitalize' }}>{a.action.kind}</span>
-                              <span style={{ color: '#9ca3af' }}>→</span>
-                              <span style={{ 
-                                color: a.status === 'executed' ? '#16a34a' : 
-                                       a.status === 'failed' ? '#dc2626' : 
-                                       a.status === 'denied' ? '#7f1d1d' : '#d97706'
-                              }}>
-                                {a.status}
-                              </span>
-                              {a.source && (
-                                <span style={{ color: '#9ca3af' }}>({a.source})</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+              <div className="terminal-log">
+                {telemetry.length === 0 ? (
+                  <div>Waiting for system activity...</div>
                 ) : (
-                  <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#fef3c7', borderRadius: '4px', border: '1px solid #fcd34d', fontSize: '0.875rem', color: '#92400e' }}>
-                    🔒 Remote control is disabled. Ask user to enable &quot;Allow Control&quot; on the desktop app.
-                  </div>
+                  telemetry.map((line, index) => <div key={`${line}-${index}`}>{line}</div>)
                 )}
-                
-                {screenMeta && (
-                  <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#666' }}>
-                    <div>Resolution: {screenMeta.width}×{screenMeta.height}</div>
-                    <div>Size: {(screenMeta.byteLength / 1024).toFixed(1)} KB</div>
-                    <div>Updated: {formatTime(screenMeta.at)}</div>
-                  </div>
-                )}
-
-                <p style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#9ca3af' }}>
-                  Updates in real-time via SSE
-                </p>
               </div>
-            ) : (
-              <div
-                style={{
-                  padding: '2rem',
-                  textAlign: 'center',
-                  background: '#f9fafb',
-                  borderRadius: '4px',
-                  color: '#6b7280',
-                }}
-              >
-                <p>Screen preview is not enabled.</p>
-                <p style={{ fontSize: '0.75rem', marginTop: '0.5rem' }}>
-                  Ask the user to enable &quot;Share Screen Preview&quot; in the desktop overlay.
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+              <p className="small-note">Updates stream through SSE and local dashboard actions.</p>
+            </div>
+          </Card>
+        </div>
+      </section>
     </main>
-  );
-}
-
-function StatusBadge({ label, color }: { label: string; color: string }) {
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '4px',
-        padding: '2px 8px',
-        borderRadius: '9999px',
-        fontSize: '0.75rem',
-        fontWeight: 500,
-        backgroundColor: `${color}20`,
-        color,
-      }}
-    >
-      <span
-        style={{
-          width: '6px',
-          height: '6px',
-          borderRadius: '50%',
-          backgroundColor: color,
-        }}
-      />
-      {label}
-    </span>
   );
 }

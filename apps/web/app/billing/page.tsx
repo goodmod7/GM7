@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { ArrowLeft, CreditCard, ShieldCheck, Sparkles } from 'lucide-react';
 import Link from 'next/link';
 import { createCheckoutSession, createPortalSession, getBillingStatus, type BillingStatus } from '../../lib/auth';
+import { Banner, Badge, Button, Card } from '../../components/ui';
 
 export default function BillingPage() {
   const [billing, setBilling] = useState<BillingStatus | null>(null);
@@ -71,98 +73,106 @@ export default function BillingPage() {
 
   if (loading) {
     return (
-      <main style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto' }}>
-        <p>Loading billing status...</p>
+      <main className="page--narrow">
+        <div className="banner">
+          <Sparkles size={16} className="spinner" />
+          Loading billing status...
+        </div>
       </main>
     );
   }
 
   return (
-    <main style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
-        <Link href="/" style={{ color: '#0070f3', textDecoration: 'none' }}>
-          ← Back to Home
+    <main className="page--narrow">
+      <div className="split">
+        <Link href="/" className="button button--ghost" style={{ width: 'fit-content' }}>
+          <ArrowLeft size={16} />
+          Back to Home
         </Link>
-        <Link href="/dashboard" style={{ color: '#0070f3', textDecoration: 'none' }}>
-          Dashboard →
+        <Link href="/dashboard" className="button button--secondary" style={{ width: 'fit-content' }}>
+          Dashboard
         </Link>
       </div>
 
-      <h1 style={{ marginTop: '1rem' }}>Billing</h1>
-      <p>Manage your subscription to unlock run creation and remote control automation.</p>
+      <section className="hero" style={{ marginTop: 28 }}>
+        <Badge>
+          <CreditCard size={14} />
+          Billing
+        </Badge>
+        <h1 className="section-heading" style={{ fontSize: 'clamp(2rem, 4vw, 3.2rem)' }}>
+          Billing and Quotas
+        </h1>
+        <p className="hero__subtitle" style={{ maxWidth: 680 }}>
+          Manage your subscription to unlock run creation and remote control automation while keeping the free
+          local path intact.
+        </p>
+      </section>
 
-      {billingState === 'success' && (
-        <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#dcfce7', border: '1px solid #86efac', borderRadius: '8px', color: '#166534' }}>
-          Billing completed. Your subscription status will update as soon as the Stripe webhook is processed.
+      <div className="stack" style={{ marginTop: 24 }}>
+        {billingState === 'success' ? (
+          <Banner tone="success">Billing completed. Your subscription status will update as soon as the Stripe webhook is processed.</Banner>
+        ) : null}
+
+        {billingState === 'cancel' ? (
+          <Banner tone="warning">Checkout was canceled. You can resume anytime.</Banner>
+        ) : null}
+
+        {error ? <Banner tone="danger">{error}</Banner> : null}
+      </div>
+
+      <Card style={{ marginTop: 24 }}>
+        <div className="split">
+          <div className="stack" style={{ gap: 12 }}>
+            <p className="section-title" style={{ marginBottom: 0 }}>
+              Subscription status
+            </p>
+            <h2 className="section-heading" style={{ fontSize: 36 }}>
+              {isActive ? 'Active' : 'Inactive'}
+            </h2>
+            <p className="copy">
+              {isActive
+                ? 'Premium remote-control and run creation features are unlocked for this account.'
+                : 'Upgrade only if you need premium remote workflows. Local desktop acquisition remains available without it.'}
+            </p>
+          </div>
+
+          <div className="stack" style={{ gap: 10, minWidth: 220 }}>
+            <Badge tone={isActive ? 'success' : 'warning'}>
+              <ShieldCheck size={14} />
+              {isActive ? 'Pro Network Active' : 'Upgrade Available'}
+            </Badge>
+            {billing?.subscriptionCurrentPeriodEnd ? (
+              <p className="small-note mono">
+                Current period ends: {new Date(billing.subscriptionCurrentPeriodEnd).toLocaleString()}
+              </p>
+            ) : null}
+            {billing?.planPriceId ? <p className="small-note mono">Price: {billing.planPriceId}</p> : null}
+          </div>
         </div>
-      )}
 
-      {billingState === 'cancel' && (
-        <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: '8px', color: '#92400e' }}>
-          Checkout was canceled. You can resume anytime.
-        </div>
-      )}
-
-      {error && (
-        <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: '8px', color: '#991b1b' }}>
-          {error}
-        </div>
-      )}
-
-      <section style={{ marginTop: '1.5rem', padding: '1rem', background: 'white', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
-        <div style={{ fontSize: '0.875rem', color: '#6b7280' }}>Subscription status</div>
-        <div style={{ marginTop: '0.25rem', fontSize: '1.25rem', fontWeight: 600, color: isActive ? '#166534' : '#991b1b' }}>
-          {isActive ? 'Active' : 'Inactive'}
-        </div>
-        {billing?.subscriptionCurrentPeriodEnd && (
-          <p style={{ marginTop: '0.5rem', color: '#6b7280' }}>
-            Current period ends: {new Date(billing.subscriptionCurrentPeriodEnd).toLocaleString()}
-          </p>
-        )}
-        {billing?.planPriceId && (
-          <p style={{ marginTop: '0.25rem', color: '#6b7280' }}>
-            Price: {billing.planPriceId}
-          </p>
-        )}
-
-        <div style={{ marginTop: '1rem' }}>
+        <div className="row-actions" style={{ marginTop: 24 }}>
           {isActive ? (
-            <button
+            <Button
               onClick={() => {
                 void handleManageBilling();
               }}
-              disabled={busy}
-              style={{
-                padding: '0.75rem 1.25rem',
-                borderRadius: '8px',
-                border: 'none',
-                background: busy ? '#9ca3af' : '#0f766e',
-                color: 'white',
-                cursor: busy ? 'not-allowed' : 'pointer',
-              }}
+              loading={busy}
+              variant="secondary"
             >
               Manage Billing
-            </button>
+            </Button>
           ) : (
-            <button
+            <Button
               onClick={() => {
                 void handleSubscribe();
               }}
-              disabled={busy}
-              style={{
-                padding: '0.75rem 1.25rem',
-                borderRadius: '8px',
-                border: 'none',
-                background: busy ? '#9ca3af' : '#2563eb',
-                color: 'white',
-                cursor: busy ? 'not-allowed' : 'pointer',
-              }}
+              loading={busy}
             >
-              Subscribe
-            </button>
+              Upgrade to Pro
+            </Button>
           )}
         </div>
-      </section>
+      </Card>
     </main>
   );
 }

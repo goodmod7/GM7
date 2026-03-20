@@ -12,7 +12,7 @@ const mainWindow = tauriConfig.app?.windows?.find((window) => window.label === '
 test('desktop bundle is configured for macOS glass window support', () => {
   assert.equal(tauriConfig.app?.macOSPrivateApi, true);
   assert.equal(mainWindow?.transparent, true);
-  assert.ok(['overlay', 'transparent'].includes(mainWindow?.titleBarStyle));
+  assert.ok(['Overlay', 'Transparent'].includes(mainWindow?.titleBarStyle));
 });
 
 test('desktop bundle ships branded macOS icon assets', () => {

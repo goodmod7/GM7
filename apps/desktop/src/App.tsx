@@ -907,9 +907,7 @@ function App() {
       });
 
       setClient(wsClient);
-      if (deviceToken) {
-        wsClient.connect(runtimeConfig.wsUrl);
-      }
+      wsClient.connect(runtimeConfig.wsUrl);
 
       if (getSettings().startMinimizedToTray) {
         setTimeout(() => {
@@ -1560,6 +1558,7 @@ function App() {
       setSessionDeviceToken(result.deviceToken);
       setAuthState('signed_in');
       client.setDeviceToken(result.deviceToken);
+      client.disconnect();
       client.connect(runtimeConfig.wsUrl);
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : 'Desktop sign-in failed');

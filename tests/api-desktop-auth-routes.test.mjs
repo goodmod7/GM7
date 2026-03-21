@@ -72,6 +72,18 @@ test('desktop auth routes use the handoff helper and rotate device tokens throug
     'Desktop auth exchange should rotate the durable device token through the existing device ownership path'
   );
 
+  assert.doesNotMatch(
+    source,
+    /const persistedDevice = await devicesRepo\.findByDeviceId\(deviceId\);\s*if \(!persistedDevice\) {\s*reply\.status\(404\);\s*return \{ error: 'Device not found' \};\s*}/,
+    'Desktop auth exchange should not fail only because a fresh install has not created its device row yet'
+  );
+
+  assert.match(
+    devicesRepoSource,
+    /async claimDevice\([\s\S]*prisma\.device\.upsert\(/,
+    'claimDevice should upsert the device row so exchange can recover when the first websocket hello has not happened yet'
+  );
+
   assert.match(
     devicesRepoSource,
     /deviceTokenHash/,

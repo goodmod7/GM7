@@ -1092,12 +1092,6 @@ fastify.post('/desktop/auth/exchange', async (request, reply) => {
     return { error: consumed.error };
   }
 
-  const persistedDevice = await devicesRepo.findByDeviceId(deviceId);
-  if (!persistedDevice) {
-    reply.status(404);
-    return { error: 'Device not found' };
-  }
-
   const deviceToken = randomBytes(36).toString('base64url');
   await devicesRepo.claimDevice(deviceId, consumed.userId, deviceToken);
   deviceStore.claimDevice(deviceId);

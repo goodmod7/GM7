@@ -59,6 +59,28 @@ test('desktop auth helper uses loopback handoff with system browser and existing
   );
 });
 
+test('desktop startup pre-registers fresh installs and sign-in forces a tokenized reconnect', () => {
+  const source = readFileSync(appPath, 'utf8');
+
+  assert.doesNotMatch(
+    source,
+    /if \(deviceToken\) {\s*wsClient\.connect\(runtimeConfig\.wsUrl\);\s*}/,
+    'fresh installs should still open the websocket so device.hello can create the initial device row'
+  );
+
+  assert.match(
+    source,
+    /setClient\(wsClient\);[\s\S]*wsClient\.connect\(runtimeConfig\.wsUrl\);/,
+    'desktop startup should connect the websocket after creating the client'
+  );
+
+  assert.match(
+    source,
+    /client\.setDeviceToken\(result\.deviceToken\);[\s\S]*client\.disconnect\(\);[\s\S]*client\.connect\(runtimeConfig\.wsUrl\);/,
+    'desktop sign-in should force a reconnect so an already-open unsigned socket resends hello with the new device token'
+  );
+});
+
 test('desktop app exposes sign out and clears local desktop session state', () => {
   const source = readFileSync(appPath, 'utf8');
 

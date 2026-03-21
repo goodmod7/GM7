@@ -178,9 +178,9 @@ export const devicesRepo = {
 
   async claimDevice(deviceId: string, ownerUserId: string, deviceToken: string) {
     const now = new Date();
-    const row = await prisma.device.update({
+    const row = await prisma.device.upsert({
       where: { id: deviceId },
-      data: {
+      update: {
         ownerUserId,
         pairedAt: now,
         deviceToken: null,
@@ -192,6 +192,25 @@ export const devicesRepo = {
         pairingCode: null,
         pairingExpiresAt: null,
         updatedAt: now,
+      },
+      create: {
+        id: deviceId,
+        ownerUserId,
+        deviceName: null,
+        platform: 'unknown',
+        appVersion: null,
+        deviceToken: null,
+        deviceTokenHash: hashDesktopDeviceToken(deviceToken),
+        deviceTokenIssuedAt: now,
+        deviceTokenExpiresAt: getDesktopDeviceSessionExpiryDate(now),
+        deviceTokenLastUsedAt: now,
+        deviceTokenRevokedAt: null,
+        pairingCode: null,
+        pairingExpiresAt: null,
+        pairedAt: now,
+        lastSeenAt: now,
+        controlEnabled: false,
+        screenStreamEnabled: false,
       },
     });
     return {

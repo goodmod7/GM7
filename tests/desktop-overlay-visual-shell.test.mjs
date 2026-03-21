@@ -35,8 +35,13 @@ test('desktop renders a fullscreen premium overlay shell while active work is ru
   );
   assert.match(
     overlayShellSource,
-    /linear-gradient|radial-gradient|rgba\(0,\s*0,\s*0/i,
-    'overlay shell should use premium dark tinted overlay styling'
+    /linear-gradient|radial-gradient|rgba\(255,\s*255,\s*255/i,
+    'overlay shell should keep a layered glass treatment instead of a flat overlay'
+  );
+  assert.doesNotMatch(
+    overlayShellSource,
+    /rgba\(0,\s*0,\s*0,\s*0\.(?:[5-9]|\d{2,})\)|rgba\(0,\s*0,\s*0,\s*1\)/i,
+    'overlay shell should no longer rely on heavy black dimming once the user needs to watch the desktop underneath'
   );
   assert.match(overlayShellSource, /\bGORKH\b/, 'overlay shell should carry the GORKH brand');
   assert.match(overlayShellSource, /pointerEvents:\s*'none'|pointerEvents:\s*"none"/, 'overlay shell should behave as the atmospheric layer while the controller stays interactive');

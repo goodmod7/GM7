@@ -30,4 +30,34 @@ test('desktop overlay mode uses a compact bottom-right controller for live contr
     'controller should include a short assistant chat area'
   );
   assert.match(controllerSource, /statusLabel/, 'controller should show the current assistant status label');
+  assert.doesNotMatch(
+    controllerSource,
+    /rgba\(5,\s*7,\s*10,\s*0\.9\)|rgba\(8,\s*10,\s*14,\s*0\.94\)/,
+    'overlay controller should move away from the old near-opaque dark card treatment'
+  );
+  assert.match(
+    controllerSource,
+    /rgba\(255,\s*255,\s*255,\s*0\.[0-3]\)|transparent/i,
+    'overlay controller should use a lighter translucent glass treatment'
+  );
+});
+
+test('desktop overlay/chat flow surfaces completed results and explicit done/error labels', () => {
+  const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
+
+  assert.match(
+    appSource,
+    /currentProposal\?\.kind !== 'done'|currentProposal\?\.kind === 'done'|currentProposal\.kind === 'done'/,
+    'desktop app should react to done proposals from the retail assistant engine'
+  );
+  assert.match(
+    appSource,
+    /createChatItem\('agent',\s*currentProposal\.summary\)|createChatItem\("agent",\s*currentProposal\.summary\)/,
+    'desktop app should append the assistant completion summary into chat'
+  );
+  assert.match(
+    appSource,
+    /aiState\?\.status === 'done'[\s\S]*aiState\?\.status === 'error'/,
+    'overlay status label should explicitly handle done and error states instead of falling through to thinking'
+  );
 });

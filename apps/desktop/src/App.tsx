@@ -36,11 +36,15 @@ import { logoutDesktopSession, startDesktopSignIn } from './lib/desktopAuth.js';
 import { getDesktopAccount, revokeDesktopDevice, type DesktopAccountSnapshot } from './lib/desktopAccount.js';
 import { createDesktopRun, getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
 import {
+  createAssistantTaskConfirmation,
   buildAssistantOpeningGoal,
   ensureAssistantRunForMessage,
   getAssistantDisplayGoal,
+  interpretAssistantTaskConfirmationResponse,
   isAssistantOpeningGoal,
   isAssistantRunActive,
+  shouldConfirmAssistantTaskStart,
+  type AssistantTaskConfirmation,
 } from './lib/chatTaskFlow.js';
 import {
   enableLocalAiVisionBoost,
@@ -233,6 +237,8 @@ function App() {
   const [client, setClient] = useState<WsClient | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>(desktopRuntimeConfig.ok ? 'disconnected' : 'error');
   const [messages, setMessages] = useState<ChatItem[]>([]);
+  const [pendingTaskConfirmation, setPendingTaskConfirmation] = useState<AssistantTaskConfirmation | null>(null);
+  const [pendingTaskConfirmationBusy, setPendingTaskConfirmationBusy] = useState(false);
   const [deviceId, setDeviceId] = useState<string>('');
   const [authState, setAuthState] = useState<'checking' | 'signed_out' | 'signing_in' | 'signed_in' | 'signing_out'>('checking');
   const [authError, setAuthError] = useState<string | null>(null);
@@ -491,6 +497,8 @@ function App() {
       return;
     }
 
+    setPendingTaskConfirmation(null);
+    setPendingTaskConfirmationBusy(false);
     assistantAutoStartAttemptedRef.current = false;
     assistantAutoStartInFlightRef.current = false;
     assistantStartingRunIdRef.current = null;
@@ -579,6 +587,20 @@ function App() {
         return prev;
       }
       return [...prev, createChatItem('agent', currentProposal.question)];
+    });
+  }, [currentProposal]);
+
+  useEffect(() => {
+    if (currentProposal?.kind !== 'done') {
+      return;
+    }
+
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === 'agent' && last.text === currentProposal.summary) {
+        return prev;
+      }
+      return [...prev, createChatItem('agent', currentProposal.summary)];
     });
   }, [currentProposal]);
 
@@ -1330,6 +1352,121 @@ function App() {
     }
   }, []);
 
+  const dispatchConfirmedAssistantTask = useCallback(async (trimmed: string): Promise<boolean> => {
+    if (!client || !runtimeConfig || !sessionDeviceToken) {
+      setMessages((prev) => [
+        ...prev,
+        createChatItem('agent', 'Sign in and reconnect this desktop before asking the assistant to work.'),
+      ]);
+      return false;
+    }
+
+    const startingNewTask = !activeRun || !['queued', 'running', 'waiting_for_user'].includes(activeRun.status);
+    const isWarmupRun = Boolean(
+      activeRun
+      && llmSettings.provider === DEFAULT_LLM_PROVIDER
+      && isAssistantOpeningGoal(activeRun.goal)
+      && !assistantConsumedWarmupRunIdsRef.current.has(activeRun.runId)
+    );
+    const canUseWarmupRun = Boolean(isWarmupRun && assistantEngine && aiState?.status === 'asking_user');
+    const shouldReplaceWarmupRun = Boolean(isWarmupRun && !canUseWarmupRun);
+    const shouldCountManagedLocalTaskStart = startingNewTask || isWarmupRun;
+
+    try {
+      let runToReuse = activeRun;
+      if (shouldReplaceWarmupRun && activeRun) {
+        assistantStartingRunIdRef.current = null;
+        assistantEngine?.stop('Replacing warmup session with a direct task run');
+        setAssistantEngine(null);
+        setAiState(null);
+        setCurrentProposal(undefined);
+        client.sendRunCancel(activeRun.runId);
+        runToReuse = null;
+      }
+
+      const run = await ensureAssistantRunForMessage({
+        message: trimmed,
+        activeRun: runToReuse,
+        runtimeConfig,
+        deviceToken: sessionDeviceToken,
+      });
+      const displayRun = isWarmupRun
+        ? {
+            ...run,
+            goal: trimmed,
+          }
+        : run;
+
+      setActiveRun(displayRun);
+      setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, displayRun));
+      if (llmSettings.provider === DEFAULT_LLM_PROVIDER && shouldCountManagedLocalTaskStart) {
+        setLocalAiTaskUsage(recordManagedLocalTaskStart(window.localStorage));
+        if (isWarmupRun && activeRun) {
+          assistantConsumedWarmupRunIdsRef.current.add(activeRun.runId);
+        }
+      }
+
+      const sent = client.sendChat(trimmed, run.runId);
+      if (!sent) {
+        setMessages((prev) => [
+          ...prev,
+          createChatItem('agent', 'The desktop disconnected before the assistant could start. Reconnect and try again.'),
+        ]);
+        return false;
+      }
+
+      if (canUseWarmupRun && assistantEngine) {
+        assistantEngine.userResponse(trimmed);
+      }
+
+      return true;
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        createChatItem(
+          'agent',
+          err instanceof Error ? err.message : 'The assistant could not start the task from chat.'
+        ),
+      ]);
+      return false;
+    }
+  }, [
+    activeRun,
+    assistantEngine,
+    aiState,
+    client,
+    desktopBootstrap?.billing,
+    desktopAccount?.billing,
+    llmSettings.provider,
+    runtimeConfig,
+    sessionDeviceToken,
+  ]);
+
+  const handleCancelPendingTask = useCallback(() => {
+    if (!pendingTaskConfirmation) {
+      return;
+    }
+    setPendingTaskConfirmation(null);
+    setPendingTaskConfirmationBusy(false);
+    setMessages((prev) => [
+      ...prev,
+      createChatItem('agent', 'Okay, I will not start that task. Send a new request when you are ready.'),
+    ]);
+  }, [pendingTaskConfirmation]);
+
+  const handleConfirmPendingTask = useCallback(() => {
+    if (!pendingTaskConfirmation || pendingTaskConfirmationBusy) {
+      return;
+    }
+
+    setPendingTaskConfirmationBusy(true);
+    void dispatchConfirmedAssistantTask(pendingTaskConfirmation.goal)
+      .finally(() => {
+        setPendingTaskConfirmation(null);
+        setPendingTaskConfirmationBusy(false);
+      });
+  }, [dispatchConfirmedAssistantTask, pendingTaskConfirmation, pendingTaskConfirmationBusy]);
+
   // Handle sending a chat message
   const handleSendMessage = useCallback(
     (text: string) => {
@@ -1338,10 +1475,27 @@ function App() {
         return;
       }
 
+      const confirmationAction = pendingTaskConfirmation && !pendingTaskConfirmationBusy
+        ? interpretAssistantTaskConfirmationResponse(trimmed)
+        : null;
+
       setMessages((prev) => [
         ...prev,
         createChatItem('user', trimmed),
       ]);
+
+      if (confirmationAction === 'confirm') {
+        void handleConfirmPendingTask();
+        return;
+      }
+
+      if (confirmationAction === 'cancel') {
+        handleCancelPendingTask();
+        return;
+      }
+
+      setPendingTaskConfirmation(null);
+      setPendingTaskConfirmationBusy(false);
 
       if (!client || !runtimeConfig || !sessionDeviceToken) {
         setMessages((prev) => [
@@ -1387,8 +1541,6 @@ function App() {
         && isAssistantOpeningGoal(activeRun.goal)
         && !assistantConsumedWarmupRunIdsRef.current.has(activeRun.runId)
       );
-      const canUseWarmupRun = Boolean(isWarmupRun && assistantEngine && aiState?.status === 'asking_user');
-      const shouldReplaceWarmupRun = Boolean(isWarmupRun && !canUseWarmupRun);
       const shouldCountManagedLocalTaskStart = startingNewTask || isWarmupRun;
 
       if (llmSettings.provider === DEFAULT_LLM_PROVIDER) {
@@ -1418,73 +1570,30 @@ function App() {
         }
       }
 
-      void (async () => {
-        try {
-          let runToReuse = activeRun;
-          if (shouldReplaceWarmupRun && activeRun) {
-            assistantStartingRunIdRef.current = null;
-            assistantEngine?.stop('Replacing warmup session with a direct task run');
-            setAssistantEngine(null);
-            setAiState(null);
-            setCurrentProposal(undefined);
-            client.sendRunCancel(activeRun.runId);
-            runToReuse = null;
-          }
+      if (shouldConfirmAssistantTaskStart(activeRun)) {
+        const confirmation = createAssistantTaskConfirmation(trimmed);
+        setPendingTaskConfirmation(confirmation);
+        setMessages((prev) => [
+          ...prev,
+          createChatItem('agent', confirmation.prompt),
+        ]);
+        return;
+      }
 
-          const run = await ensureAssistantRunForMessage({
-            message: trimmed,
-            activeRun: runToReuse,
-            runtimeConfig,
-            deviceToken: sessionDeviceToken,
-          });
-          const displayRun = isWarmupRun
-            ? {
-                ...run,
-                goal: trimmed,
-              }
-            : run;
-
-          setActiveRun(displayRun);
-          setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, displayRun));
-          if (llmSettings.provider === DEFAULT_LLM_PROVIDER && shouldCountManagedLocalTaskStart) {
-            setLocalAiTaskUsage(recordManagedLocalTaskStart(window.localStorage));
-            if (isWarmupRun && activeRun) {
-              assistantConsumedWarmupRunIdsRef.current.add(activeRun.runId);
-            }
-          }
-
-          const sent = client.sendChat(trimmed, run.runId);
-          if (!sent) {
-            setMessages((prev) => [
-              ...prev,
-              createChatItem('agent', 'The desktop disconnected before the assistant could start. Reconnect and try again.'),
-            ]);
-            return;
-          }
-
-          if (canUseWarmupRun && assistantEngine) {
-            assistantEngine.userResponse(trimmed);
-          }
-        } catch (err) {
-          setMessages((prev) => [
-            ...prev,
-            createChatItem(
-              'agent',
-              err instanceof Error ? err.message : 'The assistant could not start the task from chat.'
-            ),
-          ]);
-        }
-      })();
+      void dispatchConfirmedAssistantTask(trimmed);
     },
     [
       activeRun,
-      assistantEngine,
-      aiState,
       client,
       desktopBootstrap?.billing.subscriptionStatus,
       desktopBootstrap?.billing,
       desktopAccount?.billing,
+      dispatchConfirmedAssistantTask,
+      handleCancelPendingTask,
+      handleConfirmPendingTask,
       localSettings,
+      pendingTaskConfirmation,
+      pendingTaskConfirmationBusy,
       permissionStatus,
       providerConfigured,
       runtimeConfig,
@@ -1611,6 +1720,8 @@ function App() {
     setActiveRun(null);
     setPendingApproval(null);
     setMessages([]);
+    setPendingTaskConfirmation(null);
+    setPendingTaskConfirmationBusy(false);
     setCurrentProposal(undefined);
     setToolHistoryByRun({});
     setInputPermissionError(null);
@@ -1842,6 +1953,8 @@ function App() {
     approvalController.cancelAllPending('AI Assist stopped', (item) =>
       item.kind === 'ai_proposal' || item.kind === 'tool_call'
     );
+    setPendingTaskConfirmation(null);
+    setPendingTaskConfirmationBusy(false);
     assistantStartingRunIdRef.current = null;
     assistantEngine?.stop('User stopped');
     if (activeRun) {
@@ -1969,7 +2082,11 @@ function App() {
         ? 'Waiting for your response.'
         : aiState?.status === 'executing'
           ? 'GORKH is working…'
-          : 'GORKH is thinking…';
+          : aiState?.status === 'done'
+            ? 'GORKH is done.'
+            : aiState?.status === 'error'
+              ? 'GORKH hit an error.'
+              : 'GORKH is thinking…';
   const userMessages = messages.filter((item) => item.role === 'user');
   const latestUserMessageText = userMessages[userMessages.length - 1]?.text ?? null;
   const activeRunDisplayGoal = activeRun
@@ -2590,7 +2707,7 @@ function App() {
       style={{
         width: '100vw',
         height: '100vh',
-        background: isOverlayActive ? '#020305' : platform === 'macos' ? 'transparent' : '#eef2f7',
+        background: isOverlayActive ? 'transparent' : platform === 'macos' ? 'transparent' : '#eef2f7',
         display: 'flex',
         position: 'relative',
         overflow: 'hidden',
@@ -3081,6 +3198,10 @@ function App() {
                   messages={messages}
                   status={status}
                   onSendMessage={handleSendMessage}
+                  pendingTaskConfirmation={pendingTaskConfirmation}
+                  pendingTaskConfirmationBusy={pendingTaskConfirmationBusy}
+                  onConfirmPendingTask={handleConfirmPendingTask}
+                  onCancelPendingTask={handleCancelPendingTask}
                 />
               </div>
             </section>

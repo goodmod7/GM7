@@ -38,20 +38,20 @@ export function OverlayController({
         zIndex: 140,
         width: 'min(390px, calc(100vw - 2rem))',
         borderRadius: '24px',
-        background: 'linear-gradient(180deg, rgba(5,7,10,0.9) 0%, rgba(8,10,14,0.94) 100%)',
-        border: '1px solid rgba(255,255,255,0.12)',
-        boxShadow: '0 24px 80px rgba(0,0,0,0.55)',
+        background: 'linear-gradient(180deg, rgba(255,255,255,0.18) 0%, rgba(15,23,42,0.16) 100%)',
+        border: '1px solid rgba(255,255,255,0.22)',
+        boxShadow: '0 24px 60px rgba(15,23,42,0.18)',
         color: '#f8fafc',
         overflow: 'hidden',
-        backdropFilter: 'blur(24px) saturate(130%)',
-        WebkitBackdropFilter: 'blur(24px) saturate(130%)',
+        backdropFilter: 'blur(22px) saturate(130%)',
+        WebkitBackdropFilter: 'blur(22px) saturate(130%)',
       }}
     >
       <div
         style={{
           padding: '0.95rem 1rem 0.8rem',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)',
+          borderBottom: '1px solid rgba(255,255,255,0.14)',
+          background: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.04) 100%)',
         }}
       >
         <div
@@ -80,8 +80,8 @@ export function OverlayController({
             style={{
               padding: '0.35rem 0.6rem',
               borderRadius: '999px',
-              background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.08)',
+              background: 'rgba(255,255,255,0.10)',
+              border: '1px solid rgba(255,255,255,0.12)',
               color: '#dbe4ee',
               fontSize: '0.69rem',
               letterSpacing: '0.08em',
@@ -113,7 +113,7 @@ export function OverlayController({
             style={{
               padding: '0.75rem 0.8rem',
               borderRadius: '16px',
-              background: 'rgba(255,255,255,0.04)',
+              background: 'rgba(255,255,255,0.08)',
               color: '#cbd5e1',
               fontSize: '0.84rem',
             }}
@@ -131,9 +131,9 @@ export function OverlayController({
                 padding: '0.7rem 0.8rem',
                 borderRadius: '16px',
                 background: message.role === 'user'
-                  ? 'linear-gradient(180deg, rgba(148,163,184,0.18) 0%, rgba(148,163,184,0.12) 100%)'
-                  : 'linear-gradient(180deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.04) 100%)',
-                border: '1px solid rgba(255,255,255,0.06)',
+                  ? 'linear-gradient(180deg, rgba(148,163,184,0.24) 0%, rgba(148,163,184,0.14) 100%)'
+                  : 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.06) 100%)',
+                border: '1px solid rgba(255,255,255,0.10)',
                 color: '#f8fafc',
                 fontSize: '0.84rem',
                 lineHeight: 1.45,
@@ -173,7 +173,7 @@ export function OverlayController({
             padding: '0.72rem 1rem',
             borderRadius: '999px',
             border: '1px solid rgba(255,255,255,0.12)',
-            background: 'rgba(255,255,255,0.05)',
+            background: 'rgba(255,255,255,0.10)',
             color: '#f8fafc',
             cursor: 'pointer',
             fontWeight: 600,

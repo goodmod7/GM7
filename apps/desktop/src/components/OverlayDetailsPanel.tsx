@@ -45,22 +45,22 @@ export function OverlayDetailsPanel({
         zIndex: 135,
         width: 'min(420px, calc(100vw - 2rem))',
         borderRadius: '28px',
-        background: 'linear-gradient(180deg, rgba(5,7,10,0.94) 0%, rgba(8,10,14,0.97) 100%)',
-        border: '1px solid rgba(255,255,255,0.10)',
-        boxShadow: '0 24px 80px rgba(0,0,0,0.55)',
+        background: 'linear-gradient(180deg, rgba(255,255,255,0.16) 0%, rgba(15,23,42,0.18) 100%)',
+        border: '1px solid rgba(255,255,255,0.18)',
+        boxShadow: '0 24px 60px rgba(15,23,42,0.18)',
         color: '#f8fafc',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        backdropFilter: 'blur(24px) saturate(130%)',
-        WebkitBackdropFilter: 'blur(24px) saturate(130%)',
+        backdropFilter: 'blur(22px) saturate(130%)',
+        WebkitBackdropFilter: 'blur(22px) saturate(130%)',
       }}
     >
       <div
         style={{
           padding: '1rem 1rem 0.9rem',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          background: 'linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)',
+          borderBottom: '1px solid rgba(255,255,255,0.14)',
+          background: 'linear-gradient(180deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.04) 100%)',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem' }}>
@@ -114,8 +114,8 @@ export function OverlayDetailsPanel({
           style={{
             padding: '0.9rem',
             borderRadius: '18px',
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.06)',
+            background: 'rgba(255,255,255,0.08)',
+            border: '1px solid rgba(255,255,255,0.10)',
             display: 'grid',
             gap: '0.45rem',
           }}
@@ -136,8 +136,8 @@ export function OverlayDetailsPanel({
           style={{
             padding: '0.9rem',
             borderRadius: '18px',
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.06)',
+            background: 'rgba(255,255,255,0.08)',
+            border: '1px solid rgba(255,255,255,0.10)',
             display: 'grid',
             gap: '0.6rem',
           }}
@@ -156,8 +156,8 @@ export function OverlayDetailsPanel({
                 style={{
                   padding: '0.75rem',
                   borderRadius: '14px',
-                  background: 'rgba(255,255,255,0.03)',
-                  border: '1px solid rgba(255,255,255,0.05)',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.08)',
                 }}
               >
                 <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#f8fafc' }}>{item.summary}</div>
@@ -173,8 +173,8 @@ export function OverlayDetailsPanel({
           style={{
             padding: '0.9rem',
             borderRadius: '18px',
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.06)',
+            background: 'rgba(255,255,255,0.08)',
+            border: '1px solid rgba(255,255,255,0.10)',
             display: 'grid',
             gap: '0.6rem',
           }}

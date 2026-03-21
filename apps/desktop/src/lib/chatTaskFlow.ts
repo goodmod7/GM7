@@ -14,6 +14,11 @@ const OPENING_GOAL_MARKER = '[GORKH_OPENING]';
 export const ASSISTANT_OPENING_GOAL =
   `${OPENING_GOAL_MARKER} Greet the user as GORKH. Briefly explain that you can automate tasks, explain your settings and features, and guide setup. Ask what they would like help with today, then wait for their reply before taking any action.`;
 
+export interface AssistantTaskConfirmation {
+  goal: string;
+  prompt: string;
+}
+
 /**
  * Build a context-aware opening goal that tailors the greeting based on whether
  * Free AI is ready. When not ready, the assistant proactively offers to set it up.
@@ -39,6 +44,57 @@ export function getAssistantDisplayGoal(
 
   const trimmedUserMessage = latestUserMessage?.trim();
   return trimmedUserMessage || 'Ready for your instructions';
+}
+
+export function shouldConfirmAssistantTaskStart(run: RunWithSteps | null | undefined): boolean {
+  if (!run) {
+    return true;
+  }
+
+  if (isAssistantOpeningGoal(run.goal)) {
+    return true;
+  }
+
+  return !isAssistantRunActive(run);
+}
+
+export function createAssistantTaskConfirmation(message: string): AssistantTaskConfirmation {
+  const goal = message.trim();
+  return {
+    goal,
+    prompt: `I understand you want me to: ${goal}. Should I proceed?`,
+  };
+}
+
+export function interpretAssistantTaskConfirmationResponse(text: string): 'confirm' | 'cancel' | null {
+  const normalized = text.trim().toLowerCase().replace(/[.!?]+$/g, '');
+
+  if ([
+    'yes',
+    'y',
+    'ok',
+    'okay',
+    'sure',
+    'confirm',
+    'proceed',
+    'go ahead',
+  ].includes(normalized)) {
+    return 'confirm';
+  }
+
+  if ([
+    'no',
+    'n',
+    'cancel',
+    'stop',
+    'dont',
+    "don't",
+    'do not',
+  ].includes(normalized)) {
+    return 'cancel';
+  }
+
+  return null;
 }
 
 interface EnsureAssistantRunForMessageInput {

@@ -9,13 +9,30 @@ interface ChatItem {
   timestamp: number;
 }
 
+interface PendingTaskConfirmation {
+  goal: string;
+  prompt: string;
+}
+
 interface ChatOverlayProps {
   messages: ChatItem[];
   status: ConnectionStatus;
   onSendMessage: (content: string) => void;
+  pendingTaskConfirmation?: PendingTaskConfirmation | null;
+  pendingTaskConfirmationBusy?: boolean;
+  onConfirmPendingTask?: () => void;
+  onCancelPendingTask?: () => void;
 }
 
-export function ChatOverlay({ messages, status, onSendMessage }: ChatOverlayProps) {
+export function ChatOverlay({
+  messages,
+  status,
+  onSendMessage,
+  pendingTaskConfirmation = null,
+  pendingTaskConfirmationBusy = false,
+  onConfirmPendingTask,
+  onCancelPendingTask,
+}: ChatOverlayProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -144,10 +161,68 @@ export function ChatOverlay({ messages, status, onSendMessage }: ChatOverlayProp
           padding: '16px 20px 20px',
           borderTop: '1px solid #e5e7eb',
           display: 'flex',
+          flexWrap: 'wrap',
           gap: '8px',
           background: 'white',
         }}
       >
+        {pendingTaskConfirmation && (
+          <div
+            style={{
+              width: '100%',
+              marginBottom: '0.9rem',
+              padding: '0.95rem 1rem',
+              borderRadius: '14px',
+              background: '#fff7ed',
+              border: '1px solid #fdba74',
+              color: '#9a3412',
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: '0.875rem' }}>Confirm task</div>
+            <div style={{ marginTop: '0.45rem', fontSize: '0.875rem', lineHeight: 1.5 }}>
+              {pendingTaskConfirmation.prompt}
+            </div>
+            <div style={{ marginTop: '0.35rem', fontSize: '0.78rem', color: '#b45309' }}>
+              GORKH will wait for your explicit confirmation before starting. You can also send a new message if I misunderstood.
+            </div>
+            <div style={{ marginTop: '0.8rem', display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={onCancelPendingTask}
+                disabled={pendingTaskConfirmationBusy}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid #fdba74',
+                  background: 'white',
+                  color: '#9a3412',
+                  cursor: pendingTaskConfirmationBusy ? 'not-allowed' : 'pointer',
+                  opacity: pendingTaskConfirmationBusy ? 0.7 : 1,
+                  fontWeight: 600,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={onConfirmPendingTask}
+                disabled={pendingTaskConfirmationBusy}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid #0f172a',
+                  background: '#0f172a',
+                  color: 'white',
+                  cursor: pendingTaskConfirmationBusy ? 'not-allowed' : 'pointer',
+                  opacity: pendingTaskConfirmationBusy ? 0.7 : 1,
+                  fontWeight: 700,
+                }}
+              >
+                {pendingTaskConfirmationBusy ? 'Starting…' : 'Proceed'}
+              </button>
+            </div>
+          </div>
+        )}
         <input
           type="text"
           value={input}

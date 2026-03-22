@@ -35,9 +35,9 @@ test('assistant task start confirmation depends on active execution state', () =
 });
 
 test('free AI setup preflight report stays retail friendly and asks for approval', () => {
-  const report = chatTaskFlow.buildFreeAiSetupPreflightReport({
-    providerConfigured: false,
-  });
+  assert.equal(chatTaskFlow.buildFreeAiSetupPreflightReport.length, 0);
+
+  const report = chatTaskFlow.buildFreeAiSetupPreflightReport();
 
   const text = [
     report.title,

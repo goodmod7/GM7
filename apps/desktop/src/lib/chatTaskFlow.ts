@@ -88,11 +88,7 @@ export function interpretFreeAiSetupResponse(text: string): 'confirm' | 'cancel'
   return null;
 }
 
-export function buildFreeAiSetupPreflightReport(
-  input?: { providerConfigured?: boolean }
-): FreeAiSetupPreflightReport {
-  void input;
-
+export function buildFreeAiSetupPreflightReport(): FreeAiSetupPreflightReport {
   return {
     title: GORKH_FREE_AI_SETUP_COPY.title,
     summary: GORKH_FREE_AI_SETUP_COPY.summary,

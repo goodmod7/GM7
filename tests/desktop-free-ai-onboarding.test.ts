@@ -73,3 +73,45 @@ test('desktop retail shell includes a visible Set Up Free AI onboarding surface'
   assert.match(componentSource, /Ready to use/i);
   assert.match(componentSource, /Repair available/i);
 });
+
+test('desktop retail setup copy should require chat approval and support deferred task resume', () => {
+  const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
+  const gateIndex = appSource.indexOf('if (!providerConfigured)');
+  const conversationIndex = appSource.indexOf('assistantConversationTurn', gateIndex);
+  const setupStateIndex = appSource.indexOf('pendingFreeAiSetup', gateIndex);
+  const setupSection =
+    setupStateIndex !== -1 && conversationIndex !== -1
+      ? appSource.slice(setupStateIndex, conversationIndex)
+      : appSource;
+
+  assert.match(
+    setupSection,
+    /Free AI setup[\s\S]{0,220}(approve|approval)/i,
+    'main retail flow should ask for approval before setup starts'
+  );
+  assert.match(
+    setupSection,
+    /Retry Free AI/,
+    'retail setup flow should offer retry copy'
+  );
+  assert.match(
+    setupSection,
+    /Cancel this task/,
+    'retail setup flow should offer cancel copy'
+  );
+  assert.match(
+    setupSection,
+    /Open Settings/,
+    'retail setup flow should offer a settings escape hatch from the pending setup state'
+  );
+  assert.match(
+    setupSection,
+    /resumeDeferredTaskAfterFreeAiReady|replayDeferredUserTask/,
+    'retail setup flow should resume the deferred task after setup finishes'
+  );
+  assert.doesNotMatch(
+    setupSection,
+    /brew|ollama pull|manual install/i,
+    'retail setup flow should not instruct the user to manually install Ollama'
+  );
+});

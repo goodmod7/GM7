@@ -187,3 +187,36 @@ test('desktop app seeds the greeting from onboarding copy and keeps fresh chat i
     'chat overlay should disable sending while intake or confirmed task start is busy'
   );
 });
+
+test('desktop app should stage Free AI setup before first-task intake on the free plan', () => {
+  const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
+  const gateIndex = appSource.indexOf('if (!providerConfigured)');
+  const conversationIndex = appSource.indexOf('assistantConversationTurn', gateIndex);
+  const setupStateIndex = appSource.indexOf('pendingFreeAiSetup', gateIndex);
+
+  assert.notEqual(
+    gateIndex,
+    -1,
+    'desktop app should keep a providerConfigured gate for the free-plan local path'
+  );
+  assert.notEqual(
+    setupStateIndex,
+    -1,
+    'desktop app should keep a dedicated pending Free AI setup state'
+  );
+  assert.notEqual(
+    conversationIndex,
+    -1,
+    'desktop app should still contain the assistantConversationTurn intake call'
+  );
+  assert.ok(
+    setupStateIndex < conversationIndex,
+    'desktop app should stage pending Free AI setup before assistantConversationTurn in the !providerConfigured path'
+  );
+  const setupSection = appSource.slice(setupStateIndex, conversationIndex);
+  assert.match(
+    setupSection,
+    /resumeDeferredTaskAfterFreeAiReady|replayDeferredUserTask/,
+    'desktop app should resume the deferred task after Free AI is ready'
+  );
+});

@@ -56,3 +56,28 @@ test('desktop retail onboarding uses guided free-AI setup copy on the main surfa
     'the primary setup card should not lead with tier-selection jargon or optional upsells'
   );
 });
+
+test('desktop retail onboarding reserves approval and recovery language for chat-owned Free AI setup', () => {
+  const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
+  const gateIndex = appSource.indexOf('if (!providerConfigured)');
+  const conversationIndex = appSource.indexOf('assistantConversationTurn', gateIndex);
+  const setupStateIndex = appSource.indexOf('pendingFreeAiSetup', gateIndex);
+  const setupSection =
+    setupStateIndex !== -1 && conversationIndex !== -1
+      ? appSource.slice(setupStateIndex, conversationIndex)
+      : appSource;
+
+  assert.match(setupSection, /Retry Free AI/, 'retail onboarding should offer retry copy for setup failures');
+  assert.match(setupSection, /Cancel this task/, 'retail onboarding should offer cancel copy for setup failures');
+  assert.match(setupSection, /Open Settings/, 'retail onboarding should offer a settings escape hatch from the pending setup state');
+  assert.match(
+    setupSection,
+    /resumeDeferredTaskAfterFreeAiReady|replayDeferredUserTask/,
+    'retail onboarding should resume the deferred task after Free AI is ready'
+  );
+  assert.doesNotMatch(
+    setupSection,
+    /brew|ollama pull|manual install/i,
+    'retail onboarding should not direct users to manual Ollama installation'
+  );
+});

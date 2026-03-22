@@ -149,6 +149,7 @@ Example:
 Rules:
 - Be specific about UI actions (mention element names, coordinates if known)
 - Use "tool" type for file operations or terminal commands
+- Use "ui_action" with open_app when the task requires launching a desktop app or browser by name
 - Use "ask_user" when you need clarification
 - Keep steps atomic (one action per step)"#;
 
@@ -207,8 +208,8 @@ Output format: Return valid JSON with ONE of these structures:
 
 1. UI Action:
 {
-  "action_type": "click|double_click|type|hotkey|scroll|wait",
-  "params": {"x": 0.5, "y": 0.3} or {"text": "hello"} or {"key": "enter", "modifiers": ["ctrl"]},
+  "action_type": "click|double_click|type|hotkey|scroll|wait|open_app",
+  "params": {"x": 0.5, "y": 0.3} or {"text": "hello"} or {"key": "enter", "modifiers": ["ctrl"]} or {"app_name": "Photoshop"},
   "rationale": "Why this action",
   "confidence": 0.9
 }
@@ -237,6 +238,7 @@ Output format: Return valid JSON with ONE of these structures:
 Guidelines:
 - Use normalized coordinates (0-1) for UI actions
 - Be precise about element locations
+- Use open_app when the next action is to launch a desktop app or browser by name
 - Ask for help if confidence is low (< 0.7)"#;
 
         let user = format!(

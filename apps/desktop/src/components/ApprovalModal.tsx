@@ -34,39 +34,37 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
     <div
       style={{
         position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: overlayMode ? 'rgba(0, 0, 0, 0.72)' : 'rgba(0, 0, 0, 0.5)',
-        backdropFilter: overlayMode ? 'blur(12px)' : undefined,
-        WebkitBackdropFilter: overlayMode ? 'blur(12px)' : undefined,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        right: '1rem',
+        bottom: '1rem',
         zIndex: 1000,
+        width: 'min(420px, calc(100vw - 2rem))',
+        maxHeight: 'calc(100vh - 2rem)',
+        overflow: 'auto',
+        padding: 0,
+        pointerEvents: 'auto',
+        background: 'transparent',
       }}
     >
       <div
         style={{
-          background: cardBackground,
-          borderRadius: '12px',
-          padding: '1.5rem',
-          maxWidth: '480px',
-          width: '90%',
-          boxShadow: overlayMode ? '0 24px 80px rgba(0, 0, 0, 0.55)' : '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+          background: overlayMode
+            ? 'rgba(15,23,42,0.92)'
+            : cardBackground,
+          borderRadius: '18px',
+          padding: '1rem',
+          boxShadow: overlayMode ? '0 18px 42px rgba(15,23,42,0.22)' : '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
           border: overlayMode ? '1px solid rgba(255,255,255,0.10)' : 'none',
           color: cardColor,
         }}
       >
         {/* Header */}
-        <div style={{ marginBottom: '1rem' }}>
+        <div style={{ marginBottom: '0.8rem' }}>
           {overlayMode && (
             <div
               style={{
-                marginBottom: '0.75rem',
-                fontSize: '0.76rem',
-                letterSpacing: '0.22em',
+                marginBottom: '0.4rem',
+                fontSize: '0.7rem',
+                letterSpacing: '0.18em',
                 textTransform: 'uppercase',
                 color: '#cbd5e1',
               }}
@@ -79,15 +77,15 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
               display: 'inline-flex',
               alignItems: 'center',
               gap: '0.5rem',
-              padding: '0.25rem 0.75rem',
+              padding: '0.22rem 0.65rem',
               borderRadius: '9999px',
-              fontSize: '0.75rem',
+              fontSize: '0.68rem',
               fontWeight: 600,
               textTransform: 'uppercase',
               backgroundColor: riskConfig.bg,
               color: riskConfig.text,
               border: `1px solid ${riskConfig.border}`,
-              marginBottom: '0.75rem',
+              marginBottom: '0.55rem',
             }}
           >
             {approval.risk} Risk
@@ -98,11 +96,11 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
         </div>
 
         {/* Description */}
-          <p
+        <p
           style={{
-            margin: '0 0 1rem',
+            margin: '0 0 0.85rem',
             color: secondaryTextColor,
-            fontSize: '0.9375rem',
+            fontSize: '0.9rem',
             lineHeight: 1.5,
           }}
         >
@@ -112,12 +110,12 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
         {/* Expiration warning */}
         <div
           style={{
-            padding: '0.75rem',
+            padding: '0.7rem',
             backgroundColor: '#fef3c7',
-            borderRadius: '6px',
-            fontSize: '0.875rem',
+            borderRadius: '12px',
+            fontSize: '0.84rem',
             color: '#92400e',
-            marginBottom: '1rem',
+            marginBottom: '0.85rem',
           }}
         >
           <strong>⏱ Time Limit:</strong> This request expires at{' '}
@@ -125,12 +123,12 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
         </div>
 
         {/* Comment input */}
-        <div style={{ marginBottom: '1rem' }}>
+        <div style={{ marginBottom: '0.85rem' }}>
           <label
             style={{
               display: 'block',
               marginBottom: '0.25rem',
-              fontSize: '0.875rem',
+              fontSize: '0.82rem',
               fontWeight: 500,
               color: overlayMode ? '#e2e8f0' : '#374151',
             }}
@@ -140,17 +138,17 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
           <textarea
             value={comment}
             onChange={(e) => setComment(e.target.value)}
-            placeholder="Add a note about your decision..."
-            disabled={isSubmitting}
-            style={{
-              width: '100%',
-              padding: '0.5rem 0.75rem',
-              borderRadius: '6px',
-              border: overlayMode ? '1px solid rgba(255,255,255,0.12)' : '1px solid #d1d5db',
-              fontSize: '0.875rem',
-              fontFamily: 'inherit',
-              resize: 'vertical',
-              minHeight: '80px',
+              placeholder="Add a note about your decision..."
+              disabled={isSubmitting}
+              style={{
+                width: '100%',
+                padding: '0.5rem 0.75rem',
+                borderRadius: '10px',
+                border: overlayMode ? '1px solid rgba(255,255,255,0.12)' : '1px solid #d1d5db',
+                fontSize: '0.84rem',
+                fontFamily: 'inherit',
+                resize: 'vertical',
+                minHeight: '80px',
               background: overlayMode ? 'rgba(255,255,255,0.04)' : 'white',
               color: overlayMode ? '#f8fafc' : '#111827',
             }}
@@ -158,19 +156,19 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
         </div>
 
         {/* Actions */}
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '0.55rem', flexWrap: 'wrap' }}>
           {overlayMode && onStopAll && (
             <button
               onClick={onStopAll}
               disabled={isSubmitting}
               style={{
                 flexBasis: '100%',
-                padding: '0.75rem 1rem',
-                background: 'transparent',
+                padding: '0.65rem 0.9rem',
+                background: 'rgba(255,255,255,0.04)',
                 color: '#fca5a5',
-                border: '1px solid rgba(248,113,113,0.28)',
-                borderRadius: '6px',
-                fontSize: '0.875rem',
+                border: '1px solid rgba(248,113,113,0.22)',
+                borderRadius: '10px',
+                fontSize: '0.84rem',
                 fontWeight: 600,
                 cursor: isSubmitting ? 'not-allowed' : 'pointer',
                 opacity: isSubmitting ? 0.7 : 1,
@@ -184,12 +182,12 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
             disabled={isSubmitting}
             style={{
               flex: 1,
-              padding: '0.75rem 1rem',
-              backgroundColor: overlayMode ? 'rgba(255,255,255,0.03)' : 'white',
+              padding: '0.65rem 0.9rem',
+              backgroundColor: overlayMode ? 'rgba(255,255,255,0.04)' : 'white',
               color: '#dc2626',
               border: '1px solid #dc2626',
-              borderRadius: '6px',
-              fontSize: '0.9375rem',
+              borderRadius: '10px',
+              fontSize: '0.85rem',
               fontWeight: 500,
               cursor: isSubmitting ? 'not-allowed' : 'pointer',
               opacity: isSubmitting ? 0.7 : 1,
@@ -202,12 +200,12 @@ export function ApprovalModal({ approval, onDecision, overlayMode = false, onSto
             disabled={isSubmitting}
             style={{
               flex: 1,
-              padding: '0.75rem 1rem',
-              background: overlayMode ? 'linear-gradient(180deg, rgba(16,185,129,0.92), rgba(5,150,105,0.94))' : '#10b981',
+              padding: '0.65rem 0.9rem',
+              background: overlayMode ? 'rgba(16,185,129,0.94)' : '#10b981',
               color: 'white',
               border: 'none',
-              borderRadius: '6px',
-              fontSize: '0.9375rem',
+              borderRadius: '10px',
+              fontSize: '0.85rem',
               fontWeight: 500,
               cursor: isSubmitting ? 'not-allowed' : 'pointer',
               opacity: isSubmitting ? 0.7 : 1,

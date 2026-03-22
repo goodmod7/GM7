@@ -5,10 +5,11 @@
  * - gorkhKnowledge.ts exports the expected static knowledge
  * - gorkhContext.ts builds accurate, privacy-safe context blocks
  * - System prompt identity says "GORKH" not generic
- * - Opening goal is GORKH-branded
+ * - Onboarding copy is GORKH-branded and conversation-first
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 // ---------------------------------------------------------------------------
@@ -88,6 +89,21 @@ test('gorkhKnowledge does not contain sensitive data or implementation details t
   assert.doesNotMatch(allText, /\/Users\/|\/home\/|C:\\Users\\/);
   // No API key patterns
   assert.doesNotMatch(allText, /sk-[a-zA-Z0-9]{20,}|API key: /);
+});
+
+test('desktop app seeds its first greeting from onboarding copy instead of a hidden warmup session', () => {
+  const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
+
+  assert.match(
+    appSource,
+    /GORKH_ONBOARDING\.(firstGreeting|freeAiNotReady|providerNotConfigured)/,
+    'desktop app should source its first greeting from onboarding copy'
+  );
+  assert.doesNotMatch(
+    appSource,
+    /buildAssistantOpeningGoal|assistantAutoStartAttemptedRef|assistantAutoStartInFlightRef/,
+    'desktop app should not keep the hidden assistant warmup-run machinery'
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -314,44 +330,21 @@ test('buildGorkhIdentity identifies as GORKH not generic assistant', async () =>
 });
 
 // ---------------------------------------------------------------------------
-// chatTaskFlow ASSISTANT_OPENING_GOAL tests
+// onboarding copy tests
 // ---------------------------------------------------------------------------
 
-test('ASSISTANT_OPENING_GOAL is GORKH-branded, not generic', async () => {
-  const { ASSISTANT_OPENING_GOAL } = await import('../apps/desktop/src/lib/chatTaskFlow.ts');
+test('GORKH onboarding greeting is conversation-first and asks how it can help', async () => {
+  const { GORKH_ONBOARDING } = await import('../apps/desktop/src/lib/gorkhKnowledge.ts');
 
-  assert.match(ASSISTANT_OPENING_GOAL, /gorkh/i, 'opening goal should mention GORKH');
-  assert.doesNotMatch(
-    ASSISTANT_OPENING_GOAL,
-    /^ask the user what they want done/i,
-    'should not be the old generic opening'
-  );
+  assert.match(GORKH_ONBOARDING.firstGreeting, /gorkh/i);
+  assert.match(GORKH_ONBOARDING.firstGreeting, /what would you like|how can i help/i);
+  assert.doesNotMatch(GORKH_ONBOARDING.firstGreeting, /taking any action|starting now/i);
 });
 
-test('buildAssistantOpeningGoal returns a GORKH greeting for both freeAiReady states', async () => {
-  const { buildAssistantOpeningGoal } = await import('../apps/desktop/src/lib/chatTaskFlow.ts');
+test('GORKH onboarding setup guidance is honest when Free AI is not ready', async () => {
+  const { GORKH_ONBOARDING } = await import('../apps/desktop/src/lib/gorkhKnowledge.ts');
 
-  const goalReady = buildAssistantOpeningGoal(true);
-  const goalNotReady = buildAssistantOpeningGoal(false);
-
-  assert.match(goalReady, /gorkh/i);
-  assert.match(goalNotReady, /gorkh/i);
-
-  // Not-ready variant should guide Free AI setup
-  assert.match(goalNotReady, /free ai/i);
-  assert.match(goalNotReady, /set.*up|install/i);
-
-  // Both should be recognized as opening goals
-  const { isAssistantOpeningGoal } = await import('../apps/desktop/src/lib/chatTaskFlow.ts');
-  assert.equal(isAssistantOpeningGoal(goalReady), true);
-  assert.equal(isAssistantOpeningGoal(goalNotReady), true);
-});
-
-test('isAssistantOpeningGoal rejects non-opening goals', async () => {
-  const { isAssistantOpeningGoal } = await import('../apps/desktop/src/lib/chatTaskFlow.ts');
-
-  assert.equal(isAssistantOpeningGoal('Open the browser'), false);
-  assert.equal(isAssistantOpeningGoal(''), false);
-  assert.equal(isAssistantOpeningGoal(null), false);
-  assert.equal(isAssistantOpeningGoal(undefined), false);
+  assert.match(GORKH_ONBOARDING.freeAiNotReady, /free ai/i);
+  assert.match(GORKH_ONBOARDING.freeAiNotReady, /set.*up|get started/i);
+  assert.doesNotMatch(GORKH_ONBOARDING.freeAiNotReady, /already starting|I have begun/i);
 });

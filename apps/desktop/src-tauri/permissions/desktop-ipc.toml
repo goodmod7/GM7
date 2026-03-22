@@ -3,6 +3,7 @@ identifier = "desktop-ipc"
 description = "Allows the main desktop window to invoke the audited application IPC commands."
 
 commands.allow = [
+  "assistant_conversation_turn",
   "autostart_is_enabled",
   "autostart_set_enabled",
   "autostart_supported",
@@ -43,6 +44,7 @@ commands.allow = [
   "main_window_exit_overlay_mode",
   "main_window_overlay_status",
   "main_window_show",
+  "open_application",
   "open_external_url",
   "permissions_get_status",
   "permissions_open_settings",

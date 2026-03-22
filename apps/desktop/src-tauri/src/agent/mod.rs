@@ -1002,6 +1002,7 @@ fn summarize_retail_action(action: &RetailInputAction) -> String {
             Some(mods) if !mods.is_empty() => format!("Press {}+{}", mods.join("+"), key),
             _ => format!("Press {}", key),
         },
+        RetailInputAction::OpenApp { app_name } => format!("Open app: {}", app_name),
     }
 }
 
@@ -1102,6 +1103,22 @@ fn parse_next_operation(input: &str) -> Result<NextOperation, AgentError> {
                 },
             })
         }
+        "open_app" => {
+            let app_name = read_optional_string(&proposal.params, "app_name")
+                .or_else(|| read_optional_string(&proposal.params, "appName"))
+                .ok_or_else(|| AgentError::Provider("Missing string field 'app_name'".to_string()))?;
+            let action = RetailInputAction::OpenApp {
+                app_name: app_name.clone(),
+            };
+            Ok(NextOperation::Approval {
+                execution: PendingExecution::Action(retail_action_to_executor(&action)),
+                proposal: RetailAgentProposal::ProposeAction {
+                    action,
+                    rationale: proposal.rationale,
+                    confidence: proposal.confidence,
+                },
+            })
+        }
         "wait" => Ok(NextOperation::AutoAction {
             summary: format!(
                 "Wait {}ms",
@@ -1191,6 +1208,9 @@ fn retail_action_to_executor(action: &RetailInputAction) -> executor::Action {
         RetailInputAction::Hotkey { key, modifiers } => executor::Action::Hotkey {
             key: key.clone(),
             modifiers: modifiers.clone().unwrap_or_default(),
+        },
+        RetailInputAction::OpenApp { app_name } => executor::Action::OpenApp {
+            app_name: app_name.clone(),
         },
     }
 }

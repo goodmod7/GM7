@@ -106,6 +106,8 @@ export function summarizeInputAction(action: InputAction): string {
       return `Scroll dx=${action.dx} dy=${action.dy}`;
     case 'hotkey':
       return `Hotkey ${action.key}${action.modifiers?.length ? ` + ${action.modifiers.join('+')}` : ''}`;
+    case 'open_app':
+      return `Open app: ${action.appName}`;
     default:
       return 'Input action';
   }
@@ -145,6 +147,7 @@ export function getApprovalRiskForAction(action: InputAction): ApprovalRisk {
       return 'low';
     case 'hotkey':
     case 'type':
+    case 'open_app':
       return 'medium';
     default:
       return 'medium';

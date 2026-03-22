@@ -1,8 +1,21 @@
-use super::{AgentProposal, LlmError, LlmProvider, ProposalParams};
+use super::{
+    AgentProposal, ConversationTurnParams, ConversationTurnResult, LlmError, LlmProvider,
+    ProposalParams,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 pub struct OpenAiProvider;
+
+const OPEN_APP_PROMPT_HINT: &str = "Use open_app with {\"kind\":\"open_app\",\"appName\":\"Photoshop\"} when the next step is to launch a desktop app or browser by name.";
+
+const CONVERSATION_INTAKE_PROMPT_RULES: &str = concat!(
+    "do not start execution from the intake turn.\n",
+    "ask clarifying questions when details are missing.\n",
+    "Return either reply or confirm_task JSON.\n",
+    "Before confirm_task, provide a plain-language summary in the form \"I will ...\" and ask \"Confirm?\".\n",
+    "If the task includes opening an app or browser, mention it as open_app in the summary rather than starting execution.\n"
+);
 
 #[derive(Debug, Serialize)]
 struct OpenAiMessage {
@@ -55,10 +68,14 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<AgentProposal, LlmError> {
         let client = Client::new();
 
-        let system_prompt = super::build_system_prompt(
-            &params.constraints,
-            params.workspace_configured.unwrap_or(false),
-            params.app_context.as_deref(),
+        let system_prompt = format!(
+            "{}\n\n{}",
+            super::build_system_prompt(
+                &params.constraints,
+                params.workspace_configured.unwrap_or(false),
+                params.app_context.as_deref(),
+            ),
+            OPEN_APP_PROMPT_HINT
         );
         let user_prompt = super::build_user_prompt(
             &params.goal,
@@ -140,28 +157,76 @@ impl LlmProvider for OpenAiProvider {
             })?;
 
         // Parse the JSON response
-        let proposal: AgentProposal = match serde_json::from_str(&content) {
-            Ok(proposal) => proposal,
-            Err(e) => {
-                let cleaned = content
-                    .trim()
-                    .strip_prefix("```json")
-                    .or_else(|| content.trim().strip_prefix("```"))
-                    .and_then(|s| s.strip_suffix("```"))
-                    .unwrap_or(&content)
-                    .trim();
-
-                serde_json::from_str(cleaned).map_err(|_| LlmError {
-                    code: "INVALID_JSON".to_string(),
-                    message: format!(
-                        "Failed to parse proposal: {}. Content: {}",
-                        e,
-                        content.chars().take(200).collect::<String>()
-                    ),
-                })?
-            }
-        };
+        let proposal = super::parse_json_response::<AgentProposal>(&content, "proposal")?;
 
         Ok(proposal)
+    }
+
+    async fn conversation_turn(
+        &self,
+        params: &ConversationTurnParams,
+    ) -> Result<ConversationTurnResult, LlmError> {
+        let client = Client::new();
+        let system_prompt = format!(
+            "{}\n\n{}",
+            super::build_conversation_system_prompt(params.app_context.as_deref()),
+            CONVERSATION_INTAKE_PROMPT_RULES
+        );
+        let user_prompt = super::build_conversation_user_prompt(&params.messages);
+
+        let request_body = OpenAiRequest {
+            model: params.model.clone(),
+            messages: vec![
+                OpenAiMessage {
+                    role: "system".to_string(),
+                    content: vec![OpenAiContent::Text {
+                        text: system_prompt,
+                    }],
+                },
+                OpenAiMessage {
+                    role: "user".to_string(),
+                    content: vec![OpenAiContent::Text { text: user_prompt }],
+                },
+            ],
+            max_tokens: Some(600),
+        };
+
+        let response = client
+            .post(super::build_openai_chat_completions_url(&params.base_url))
+            .header("Authorization", format!("Bearer {}", params.api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| LlmError {
+                code: "REQUEST_FAILED".to_string(),
+                message: format!("Failed to send request: {}", e),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(LlmError {
+                code: "API_ERROR".to_string(),
+                message: format!("API error {}: {}", status, text),
+            });
+        }
+
+        let openai_response: OpenAiResponse = response.json().await.map_err(|e| LlmError {
+            code: "PARSE_ERROR".to_string(),
+            message: format!("Failed to parse response: {}", e),
+        })?;
+
+        let content = openai_response
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| LlmError {
+                code: "EMPTY_RESPONSE".to_string(),
+                message: "No response from LLM".to_string(),
+            })?;
+
+        super::parse_json_response::<ConversationTurnResult>(&content, "conversation turn")
     }
 }

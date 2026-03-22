@@ -155,6 +155,7 @@ Output format: Return a JSON array of steps, where each step has:
 Rules:
 - Be specific about UI actions
 - Use "tool" type for file operations or terminal commands
+- Use open_app when the task requires launching a desktop app or browser by name
 - Use "ask_user" when you need clarification
 - Keep steps atomic (one action per step)"#;
 
@@ -211,7 +212,7 @@ Output format: Return valid JSON with this structure:
     async fn propose_next_step(&self, request: ActionRequest) -> Result<String, ProviderError> {
         let system = r#"Based on the current screen observation, propose the next action.
 
-Output format: Return valid JSON with ONE action structure. Be precise about coordinates (normalized 0-1)."#;
+Output format: Return valid JSON with ONE action structure. Be precise about coordinates (normalized 0-1). Use open_app when the next step is to launch a desktop app or browser by name."#;
 
         let user = format!(
             "Goal: {}\n\nStep: {}\n\nScreen observation: {}\n\nWhat should I do next?",

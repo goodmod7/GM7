@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub mod claude;
 pub mod native_ollama;
@@ -80,6 +80,10 @@ pub enum InputAction {
         key: String,
         modifiers: Option<Vec<String>>,
     },
+    #[serde(rename = "open_app")]
+    OpenApp {
+        app_name: String,
+    },
 }
 
 /// A proposal from the AI agent
@@ -125,6 +129,39 @@ pub struct ProposalParams {
     pub app_context: Option<String>,
 }
 
+/// A recent conversation turn used for the intake bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationTurnMessage {
+    pub role: String,
+    pub text: String,
+}
+
+/// Parameters for requesting a conversation/intake response from the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationTurnParams {
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+    pub messages: Vec<ConversationTurnMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_context: Option<String>,
+}
+
+/// The only allowed response shapes for the intake bridge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum ConversationTurnResult {
+    #[serde(rename = "reply")]
+    Reply { message: String },
+    #[serde(rename = "confirm_task")]
+    ConfirmTask {
+        goal: String,
+        summary: String,
+        prompt: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionHistory {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,7 +181,7 @@ pub struct RunConstraints {
 
 #[cfg(test)]
 mod tests {
-    use super::RunConstraints;
+    use super::{build_conversation_user_prompt, ConversationTurnMessage, RunConstraints};
 
     #[test]
     fn run_constraints_deserialize_from_camel_case_fields() {
@@ -156,6 +193,28 @@ mod tests {
 
         assert_eq!(parsed.max_actions, 1);
         assert_eq!(parsed.max_runtime_minutes, 2);
+    }
+
+    #[test]
+    fn conversation_prompt_keeps_the_latest_messages() {
+        let messages = (0..15)
+            .map(|index| ConversationTurnMessage {
+                role: if index % 2 == 0 {
+                    "user".to_string()
+                } else {
+                    "assistant".to_string()
+                },
+                text: format!("message-{index}"),
+            })
+            .collect::<Vec<_>>();
+
+        let prompt = build_conversation_user_prompt(&messages);
+
+        assert!(!prompt.contains("message-0"));
+        assert!(!prompt.contains("message-1"));
+        assert!(!prompt.contains("message-2"));
+        assert!(prompt.contains("message-3"));
+        assert!(prompt.contains("message-14"));
     }
 }
 
@@ -180,6 +239,12 @@ pub trait LlmProvider: Send + Sync {
     /// Request a proposal from the LLM
     async fn propose_next_action(&self, params: &ProposalParams)
         -> Result<AgentProposal, LlmError>;
+
+    /// Handle a conversation/intake turn without starting execution.
+    async fn conversation_turn(
+        &self,
+        params: &ConversationTurnParams,
+    ) -> Result<ConversationTurnResult, LlmError>;
 }
 
 /// Create an LLM provider based on the provider name
@@ -214,6 +279,31 @@ pub fn build_anthropic_messages_url(base_url: &str) -> String {
         format!("{}/messages", trimmed)
     } else {
         format!("{}/v1/messages", trimmed)
+    }
+}
+
+pub fn parse_json_response<T: DeserializeOwned>(content: &str, label: &str) -> Result<T, LlmError> {
+    match serde_json::from_str(content) {
+        Ok(parsed) => Ok(parsed),
+        Err(e) => {
+            let cleaned = content
+                .trim()
+                .strip_prefix("```json")
+                .or_else(|| content.trim().strip_prefix("```"))
+                .and_then(|s| s.strip_suffix("```"))
+                .unwrap_or(content)
+                .trim();
+
+            serde_json::from_str(cleaned).map_err(|_| LlmError {
+                code: "INVALID_JSON".to_string(),
+                message: format!(
+                    "Failed to parse {}: {}. Content: {}",
+                    label,
+                    e,
+                    content.chars().take(200).collect::<String>()
+                ),
+            })
+        }
     }
 }
 
@@ -268,6 +358,7 @@ AVAILABLE ACTIONS (GUI automation):
 - scroll: {{ "kind": "scroll", "dx": 0, "dy": -100 }}  // dy negative = scroll down
 - type: {{ "kind": "type", "text": "hello world" }}  // max 500 chars
 - hotkey: {{ "kind": "hotkey", "key": "enter", "modifiers": ["ctrl"] }}  // keys: enter, tab, escape, backspace, up, down, left, right
+- open_app: {{ "kind": "open_app", "appName": "Photoshop" }}  // open a desktop app or browser by name
 
 GORKH APP TOOLS (always available — use these to read or change GORKH settings):
 - app.get_state: {{ "tool": "app.get_state" }}  // Fetch current GORKH state (Free AI, permissions, workspace, autostart)
@@ -337,5 +428,51 @@ pub fn build_user_prompt(
     }
 
     prompt.push_str("\n\nWhat is your next proposal? Return valid JSON.");
+    prompt
+}
+
+pub fn build_conversation_system_prompt(app_context: Option<&str>) -> String {
+    let app_context_section = match app_context {
+        Some(ctx) if !ctx.trim().is_empty() => format!("\n\nAPP CONTEXT:\n{}", ctx.trim()),
+        _ => String::new(),
+    };
+
+    format!(
+        "{}{}",
+        concat!(
+            "You are GORKH, an AI desktop assistant handling the conversation and intake stage only.\n",
+            "You are not executing tasks in this turn.\n",
+            "do not start execution from the intake turn.\n",
+            "ask clarifying questions when details are missing.\n",
+            "When the request is specific enough to execute, respond with kind \"confirm_task\" and provide:\n",
+            "- goal: a concise execution goal\n",
+            "- summary: a plain-language summary starting with \"I will ...\"\n",
+            "- prompt: a direct confirmation request that ends with \"Confirm?\"\n",
+            "If the task is not specific enough, respond with kind \"reply\" and a natural message.\n",
+            "Never invent missing details. Never claim execution has started.\n",
+            "Return STRICT JSON and nothing else."
+        ),
+        app_context_section
+    )
+}
+
+pub fn build_conversation_user_prompt(messages: &[ConversationTurnMessage]) -> String {
+    let mut prompt = String::from("RECENT CHAT MESSAGES:\n");
+
+    if messages.is_empty() {
+        prompt.push_str("- system: No conversation history was provided.\n");
+    } else {
+        let start_index = messages.len().saturating_sub(12);
+
+        for message in messages.iter().skip(start_index) {
+            let role = message.role.trim();
+            let text = message.text.trim();
+            prompt.push_str(&format!("- {}: {}\n", role, text));
+        }
+    }
+
+    prompt.push_str(
+        "\nDecide whether to reply conversationally or return confirm_task. Return valid JSON only.",
+    );
     prompt
 }

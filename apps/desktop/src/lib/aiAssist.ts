@@ -827,6 +827,12 @@ export class AiAssistController {
         });
         break;
 
+      case 'open_app':
+        await invoke('open_application', {
+          appName: action.appName,
+        });
+        break;
+
       default:
         throw new Error(`Unknown action kind: ${(action as {kind: string}).kind}`);
     }
@@ -847,6 +853,8 @@ export class AiAssistController {
         return `scroll (${action.dx}, ${action.dy})`;
       case 'hotkey':
         return `hotkey ${action.key}${action.modifiers?.length ? ' + ' + action.modifiers.join(',') : ''}`;
+      case 'open_app':
+        return `open app ${action.appName}`;
       default:
         return 'unknown action';
     }

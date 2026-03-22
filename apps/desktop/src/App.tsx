@@ -34,18 +34,15 @@ import {
 import { desktopRuntimeConfig } from './lib/desktopRuntimeConfig.js';
 import { logoutDesktopSession, startDesktopSignIn } from './lib/desktopAuth.js';
 import { getDesktopAccount, revokeDesktopDevice, type DesktopAccountSnapshot } from './lib/desktopAccount.js';
-import { createDesktopRun, getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
+import { getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
 import {
-  createAssistantTaskConfirmation,
-  buildAssistantOpeningGoal,
   ensureAssistantRunForMessage,
-  getAssistantDisplayGoal,
   interpretAssistantTaskConfirmationResponse,
-  isAssistantOpeningGoal,
   isAssistantRunActive,
-  shouldConfirmAssistantTaskStart,
   type AssistantTaskConfirmation,
 } from './lib/chatTaskFlow.js';
+import type { AssistantConversationMessage } from './lib/assistantConversation.js';
+import { assistantConversationTurn } from './lib/assistantConversation.js';
 import {
   enableLocalAiVisionBoost,
   getLocalAiHardwareProfile,
@@ -97,6 +94,7 @@ import {
   type GorkhPermissionStatus,
   type GorkhGpuClass,
 } from './lib/gorkhContext.js';
+import { GORKH_ONBOARDING } from './lib/gorkhKnowledge.js';
 import { ChatOverlay } from './components/ChatOverlay.js';
 import { RunPanel } from './components/RunPanel.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
@@ -232,6 +230,27 @@ function createChatItem(role: ChatItem['role'], text: string, timestamp: number 
   };
 }
 
+function toAssistantConversationMessages(items: ChatItem[]): AssistantConversationMessage[] {
+  return items.map((item) => ({
+    role: item.role,
+    text: item.text,
+  }));
+}
+
+function getAssistantConversationGreeting(provider: string, providerConfigured: boolean): string {
+  if (!providerConfigured) {
+    return provider === DEFAULT_LLM_PROVIDER
+      ? GORKH_ONBOARDING.freeAiNotReady
+      : GORKH_ONBOARDING.providerNotConfigured;
+  }
+
+  return GORKH_ONBOARDING.firstGreeting;
+}
+
+function getRunDisplayGoal(goal: string | null | undefined): string {
+  return goal?.trim() || 'Ready for your instructions';
+}
+
 function App() {
   const platform = detectPlatform();
   const [client, setClient] = useState<WsClient | null>(null);
@@ -302,16 +321,47 @@ function App() {
   const [visionBoostRequested, setVisionBoostRequested] = useState(false);
   const controlEnabledRef = useRef(localSettings.allowControlEnabled);
   const workspaceConfiguredRef = useRef(workspaceState.configured);
-  const assistantAutoStartAttemptedRef = useRef(false);
-  const assistantAutoStartInFlightRef = useRef(false);
+  const assistantGreetingSeededRef = useRef(false);
   const assistantStartingRunIdRef = useRef<string | null>(null);
-  const assistantConsumedWarmupRunIdsRef = useRef(new Set<string>());
+  const assistantConversationRequestIdRef = useRef(0);
+  const [assistantConversationBusy, setAssistantConversationBusy] = useState(false);
   const clientRef = useRef<WsClient | null>(null);
   const controlApprovalPayloadsRef = useRef(new Map<string, PendingControlApprovalPayload>());
   const proposalApprovalPayloadsRef = useRef(new Map<string, PendingProposalPayload>());
   const runtimeConfig = desktopRuntimeConfig.ok ? desktopRuntimeConfig.config : null;
   const runtimeConfigError = desktopRuntimeConfig.ok ? null : desktopRuntimeConfig.message;
   const isSignedIn = Boolean(sessionDeviceToken);
+  const gorkhAppContext = buildGorkhContextBlock({
+    authState,
+    provider: llmSettings.provider,
+    providerConfigured,
+    freeAi: localAiStatus
+      ? {
+          installStage: localAiStatus.installStage as GorkhInstallStage,
+          runtimeRunning: localAiStatus.runtimeRunning,
+          selectedTier: localAiStatus.selectedTier as GorkhLocalAiTier | null,
+          selectedModel: localAiStatus.selectedModel,
+          externalServiceDetected: localAiStatus.externalServiceDetected,
+          lastError: localAiStatus.lastError,
+        }
+      : null,
+    permissions: {
+      screenRecordingStatus: permissionStatus.screenRecording as GorkhPermissionStatus,
+      accessibilityStatus: permissionStatus.accessibility as GorkhPermissionStatus,
+      screenPreviewEnabled: localSettings.screenPreviewEnabled,
+      controlEnabled: localSettings.allowControlEnabled,
+    },
+    workspaceConfigured: workspaceState.configured,
+    workspaceRootName: workspaceState.rootName ?? null,
+    hardware: localAiHardwareProfile
+      ? {
+          gpuClass: localAiHardwareProfile.gpuClass as GorkhGpuClass,
+          ramGb: localAiHardwareProfile.ramBytes !== null
+            ? Math.round(localAiHardwareProfile.ramBytes / (1024 * 1024 * 1024))
+            : null,
+        }
+      : null,
+  });
 
   useEffect(() => {
     const previousHtmlBackground = document.documentElement.style.background;
@@ -499,10 +549,10 @@ function App() {
 
     setPendingTaskConfirmation(null);
     setPendingTaskConfirmationBusy(false);
-    assistantAutoStartAttemptedRef.current = false;
-    assistantAutoStartInFlightRef.current = false;
+    setAssistantConversationBusy(false);
+    assistantConversationRequestIdRef.current += 1;
+    assistantGreetingSeededRef.current = false;
     assistantStartingRunIdRef.current = null;
-    assistantConsumedWarmupRunIdsRef.current.clear();
   }, [isSignedIn]);
 
   useEffect(() => {
@@ -1243,39 +1293,6 @@ function App() {
       return;
     }
 
-    // Build structured GORKH app context for LLM grounding.
-    const gorkhAppContext = buildGorkhContextBlock({
-      authState,
-      provider: llmSettings.provider,
-      providerConfigured,
-      freeAi: localAiStatus
-        ? {
-            installStage: localAiStatus.installStage as GorkhInstallStage,
-            runtimeRunning: localAiStatus.runtimeRunning,
-            selectedTier: localAiStatus.selectedTier as GorkhLocalAiTier | null,
-            selectedModel: localAiStatus.selectedModel,
-            externalServiceDetected: localAiStatus.externalServiceDetected,
-            lastError: localAiStatus.lastError,
-          }
-        : null,
-      permissions: {
-        screenRecordingStatus: permissionStatus.screenRecording as GorkhPermissionStatus,
-        accessibilityStatus: permissionStatus.accessibility as GorkhPermissionStatus,
-        screenPreviewEnabled: localSettings.screenPreviewEnabled,
-        controlEnabled: localSettings.allowControlEnabled,
-      },
-      workspaceConfigured: workspaceState.configured,
-      workspaceRootName: workspaceState.rootName ?? null,
-      hardware: localAiHardwareProfile
-        ? {
-            gpuClass: localAiHardwareProfile.gpuClass as GorkhGpuClass,
-            ramGb: localAiHardwareProfile.ramBytes !== null
-              ? Math.round(localAiHardwareProfile.ramBytes / (1024 * 1024 * 1024))
-              : null,
-          }
-        : null,
-    });
-
     const engine = createAssistantEngine(assistantEngineId, {
       wsClient: client,
       deviceId,
@@ -1323,6 +1340,7 @@ function App() {
     assistantEngineId,
     client,
     deviceId,
+    gorkhAppContext,
     llmSettings,
     localAiRecommendation,
     localAiStatus,
@@ -1361,49 +1379,81 @@ function App() {
       return false;
     }
 
-    const startingNewTask = !activeRun || !['queued', 'running', 'waiting_for_user'].includes(activeRun.status);
-    const isWarmupRun = Boolean(
+    const startingNewTask = !activeRun || !isAssistantRunActive(activeRun);
+    const shouldForwardUserResponse = Boolean(
       activeRun
-      && llmSettings.provider === DEFAULT_LLM_PROVIDER
-      && isAssistantOpeningGoal(activeRun.goal)
-      && !assistantConsumedWarmupRunIdsRef.current.has(activeRun.runId)
+      && isAssistantRunActive(activeRun)
+      && assistantEngine
+      && aiState?.status === 'asking_user'
     );
-    const canUseWarmupRun = Boolean(isWarmupRun && assistantEngine && aiState?.status === 'asking_user');
-    const shouldReplaceWarmupRun = Boolean(isWarmupRun && !canUseWarmupRun);
-    const shouldCountManagedLocalTaskStart = startingNewTask || isWarmupRun;
+
+    if (startingNewTask) {
+      const executionReadiness = evaluateDesktopTaskReadiness({
+        mode: 'ai_assist',
+        subscriptionStatus: desktopBootstrap?.billing.subscriptionStatus ?? 'inactive',
+        platform,
+        permissionStatus,
+        localSettings,
+        workspaceConfigured: workspaceState.configured,
+        providerConfigured,
+        isManagedLocalProvider: llmSettings.provider === DEFAULT_LLM_PROVIDER,
+        requireControl: false,
+      });
+
+      if (!executionReadiness.ready) {
+        const setupMessage = !providerConfigured
+          ? getAssistantConversationGreeting(llmSettings.provider, providerConfigured)
+          : executionReadiness.requiredSetup[0]?.detail || 'This desktop is not ready to start assistant work yet.';
+        setMessages((prev) => [
+          ...prev,
+          createChatItem('agent', setupMessage),
+        ]);
+        return false;
+      }
+    }
 
     try {
-      let runToReuse = activeRun;
-      if (shouldReplaceWarmupRun && activeRun) {
-        assistantStartingRunIdRef.current = null;
-        assistantEngine?.stop('Replacing warmup session with a direct task run');
-        setAssistantEngine(null);
-        setAiState(null);
-        setCurrentProposal(undefined);
-        client.sendRunCancel(activeRun.runId);
-        runToReuse = null;
+      if (llmSettings.provider === DEFAULT_LLM_PROVIDER && startingNewTask) {
+        const localTaskBinding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, trimmed);
+        if (localTaskBinding.requiresVisionBoost) {
+          setVisionBoostRequested(true);
+          setMessages((prev) => [
+            ...prev,
+            createChatItem(
+              'agent',
+              `This task likely needs screenshot understanding. Enable Vision Boost to let the local assistant inspect the screen with ${localTaskBinding.visionModel}.`
+            ),
+          ]);
+          return false;
+        }
+
+        const usage = readLocalAiTaskUsage(window.localStorage);
+        const taskAllowance = canStartManagedLocalTask(
+          getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing),
+          usage
+        );
+        if (!taskAllowance.allowed) {
+          setMessages((prev) => [
+            ...prev,
+            createChatItem('agent', taskAllowance.reason || 'Free local task limit reached for today.'),
+          ]);
+          return false;
+        }
       }
+
+      assistantConversationRequestIdRef.current += 1;
+      setAssistantConversationBusy(false);
 
       const run = await ensureAssistantRunForMessage({
         message: trimmed,
-        activeRun: runToReuse,
+        activeRun,
         runtimeConfig,
         deviceToken: sessionDeviceToken,
       });
-      const displayRun = isWarmupRun
-        ? {
-            ...run,
-            goal: trimmed,
-          }
-        : run;
-
-      setActiveRun(displayRun);
-      setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, displayRun));
-      if (llmSettings.provider === DEFAULT_LLM_PROVIDER && shouldCountManagedLocalTaskStart) {
+      setActiveRun(run);
+      setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, run));
+      if (llmSettings.provider === DEFAULT_LLM_PROVIDER && startingNewTask) {
         setLocalAiTaskUsage(recordManagedLocalTaskStart(window.localStorage));
-        if (isWarmupRun && activeRun) {
-          assistantConsumedWarmupRunIdsRef.current.add(activeRun.runId);
-        }
       }
 
       const sent = client.sendChat(trimmed, run.runId);
@@ -1415,8 +1465,8 @@ function App() {
         return false;
       }
 
-      if (canUseWarmupRun && assistantEngine) {
-        assistantEngine.userResponse(trimmed);
+      if (shouldForwardUserResponse) {
+        assistantEngine?.userResponse(trimmed);
       }
 
       return true;
@@ -1432,22 +1482,32 @@ function App() {
     }
   }, [
     activeRun,
+    aiState?.status,
     assistantEngine,
-    aiState,
     client,
     desktopBootstrap?.billing,
+    desktopBootstrap?.billing.subscriptionStatus,
     desktopAccount?.billing,
+    localAiRecommendation,
+    localAiStatus,
+    localSettings,
     llmSettings.provider,
+    permissionStatus,
+    platform,
+    providerConfigured,
     runtimeConfig,
     sessionDeviceToken,
+    workspaceState.configured,
   ]);
 
   const handleCancelPendingTask = useCallback(() => {
     if (!pendingTaskConfirmation) {
       return;
     }
+    assistantConversationRequestIdRef.current += 1;
     setPendingTaskConfirmation(null);
     setPendingTaskConfirmationBusy(false);
+    setAssistantConversationBusy(false);
     setMessages((prev) => [
       ...prev,
       createChatItem('agent', 'Okay, I will not start that task. Send a new request when you are ready.'),
@@ -1459,11 +1519,14 @@ function App() {
       return;
     }
 
+    assistantConversationRequestIdRef.current += 1;
     setPendingTaskConfirmationBusy(true);
+    setAssistantConversationBusy(false);
     void dispatchConfirmedAssistantTask(pendingTaskConfirmation.goal)
       .finally(() => {
         setPendingTaskConfirmation(null);
         setPendingTaskConfirmationBusy(false);
+        setAssistantConversationBusy(false);
       });
   }, [dispatchConfirmedAssistantTask, pendingTaskConfirmation, pendingTaskConfirmationBusy]);
 
@@ -1471,9 +1534,11 @@ function App() {
   const handleSendMessage = useCallback(
     (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed) {
+      if (!trimmed || assistantConversationBusy || pendingTaskConfirmationBusy) {
         return;
       }
+
+      // Fresh chat goes through assistantConversationTurn before dispatchConfirmedAssistantTask starts any confirmed task.
 
       const confirmationAction = pendingTaskConfirmation && !pendingTaskConfirmationBusy
         ? interpretAssistantTaskConfirmationResponse(trimmed)
@@ -1505,82 +1570,85 @@ function App() {
         return;
       }
 
-      const assistantReadiness = evaluateDesktopTaskReadiness({
-        mode: 'ai_assist',
-        subscriptionStatus: desktopBootstrap?.billing.subscriptionStatus ?? 'inactive',
-        platform,
-        permissionStatus,
-        localSettings,
-        workspaceConfigured: workspaceState.configured,
-        providerConfigured,
-        isManagedLocalProvider: llmSettings.provider === DEFAULT_LLM_PROVIDER,
-        requireControl: false,
-      });
+      if (isAssistantRunActive(activeRun)) {
+        void dispatchConfirmedAssistantTask(trimmed);
+        return;
+      }
 
-      if (!assistantReadiness.ready) {
-        const setupMessage = llmSettings.provider === DEFAULT_LLM_PROVIDER && !providerConfigured
+      if (!providerConfigured) {
+        const setupMessage = llmSettings.provider === DEFAULT_LLM_PROVIDER
           ? localAiInstallProgress?.message
               || localAiRecommendation?.reason
-              || 'Set up Free AI first so the local assistant can prepare this desktop.'
-          : assistantReadiness.requiredSetup[0]?.detail || 'This desktop is not ready to start assistant work yet.';
+              || GORKH_ONBOARDING.freeAiNotReady
+          : GORKH_ONBOARDING.providerNotConfigured;
         setMessages((prev) => [
           ...prev,
-          createChatItem(
-            'agent',
-            setupMessage
-          ),
+          createChatItem('agent', setupMessage),
         ]);
         return;
       }
 
-      const localPlanPolicy = getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing);
-      const startingNewTask = !activeRun || !['queued', 'running', 'waiting_for_user'].includes(activeRun.status);
-      const isWarmupRun = Boolean(
-        activeRun
-        && llmSettings.provider === DEFAULT_LLM_PROVIDER
-        && isAssistantOpeningGoal(activeRun.goal)
-        && !assistantConsumedWarmupRunIdsRef.current.has(activeRun.runId)
-      );
-      const shouldCountManagedLocalTaskStart = startingNewTask || isWarmupRun;
+      if (assistantConversationBusy) {
+        return;
+      }
 
-      if (llmSettings.provider === DEFAULT_LLM_PROVIDER) {
-        const localTaskBinding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, trimmed);
-        if (localTaskBinding.requiresVisionBoost) {
-          setVisionBoostRequested(true);
+      const requestId = assistantConversationRequestIdRef.current + 1;
+      assistantConversationRequestIdRef.current = requestId;
+      setAssistantConversationBusy(true);
+      void (async () => {
+        try {
+          const conversationSettings = llmSettings.provider === DEFAULT_LLM_PROVIDER
+            ? resolveManagedLocalLlmBinding(localAiStatus, localAiRecommendation)
+            : llmSettings;
+
+          const result = await assistantConversationTurn({
+            provider: llmSettings.provider,
+            baseUrl: conversationSettings.baseUrl,
+            model: conversationSettings.model,
+            messages: toAssistantConversationMessages([...messages, { id: `draft-${Date.now()}`, role: 'user', text: trimmed, timestamp: Date.now() }]),
+            appContext: gorkhAppContext ?? undefined,
+          });
+          // dispatchConfirmedAssistantTask stays on the explicit confirmation path below.
+
+          if (assistantConversationRequestIdRef.current !== requestId) {
+            return;
+          }
+
+          if (result.kind === 'reply') {
+            setMessages((prev) => [
+              ...prev,
+              createChatItem('agent', result.message),
+            ]);
+            return;
+          }
+
+          setPendingTaskConfirmation({
+            goal: result.goal,
+            summary: result.summary,
+            prompt: result.prompt,
+          });
+          setMessages((prev) => [
+            ...prev,
+            createChatItem('agent', result.summary),
+          ]);
+        } catch (err) {
+          if (assistantConversationRequestIdRef.current !== requestId) {
+            return;
+          }
+
           setMessages((prev) => [
             ...prev,
             createChatItem(
               'agent',
-              `This task likely needs screenshot understanding. Enable Vision Boost to let the local assistant inspect the screen with ${localTaskBinding.visionModel}.`
+              err instanceof Error ? err.message : 'The assistant could not respond right now.'
             ),
           ]);
-          return;
-        }
-
-        if (shouldCountManagedLocalTaskStart) {
-          const usage = readLocalAiTaskUsage(window.localStorage);
-          const taskAllowance = canStartManagedLocalTask(localPlanPolicy, usage);
-          if (!taskAllowance.allowed) {
-            setMessages((prev) => [
-              ...prev,
-              createChatItem('agent', taskAllowance.reason || 'Free local task limit reached for today.'),
-            ]);
-            return;
+        } finally {
+          if (assistantConversationRequestIdRef.current === requestId) {
+            setAssistantConversationBusy(false);
           }
         }
-      }
-
-      if (shouldConfirmAssistantTaskStart(activeRun)) {
-        const confirmation = createAssistantTaskConfirmation(trimmed);
-        setPendingTaskConfirmation(confirmation);
-        setMessages((prev) => [
-          ...prev,
-          createChatItem('agent', confirmation.prompt),
-        ]);
-        return;
-      }
-
-      void dispatchConfirmedAssistantTask(trimmed);
+      })();
     },
     [
       activeRun,
@@ -1589,21 +1657,23 @@ function App() {
       desktopBootstrap?.billing,
       desktopAccount?.billing,
       dispatchConfirmedAssistantTask,
+      gorkhAppContext,
       handleCancelPendingTask,
       handleConfirmPendingTask,
       localSettings,
+      assistantConversationBusy,
       pendingTaskConfirmation,
       pendingTaskConfirmationBusy,
-      permissionStatus,
       providerConfigured,
       runtimeConfig,
       sessionDeviceToken,
-      workspaceState.configured,
-      llmSettings.provider,
       localAiStatus,
+      localAiRecommendation,
+      llmSettings.baseUrl,
+      llmSettings.model,
+      llmSettings.provider,
       localAiInstallProgress?.message,
       localAiRecommendation?.reason,
-      localAiRecommendation,
     ]
   );
 
@@ -1722,6 +1792,8 @@ function App() {
     setMessages([]);
     setPendingTaskConfirmation(null);
     setPendingTaskConfirmationBusy(false);
+    assistantConversationRequestIdRef.current += 1;
+    setAssistantConversationBusy(false);
     setCurrentProposal(undefined);
     setToolHistoryByRun({});
     setInputPermissionError(null);
@@ -1776,6 +1848,8 @@ function App() {
   // Handle cancel run
   const handleCancelRun = useCallback(() => {
     if (!activeRun) return;
+    assistantConversationRequestIdRef.current += 1;
+    setAssistantConversationBusy(false);
     assistantStartingRunIdRef.current = null;
     assistantEngine?.stop('User canceled');
     client?.sendRunCancel(activeRun.runId);
@@ -1955,6 +2029,8 @@ function App() {
     );
     setPendingTaskConfirmation(null);
     setPendingTaskConfirmationBusy(false);
+    assistantConversationRequestIdRef.current += 1;
+    setAssistantConversationBusy(false);
     assistantStartingRunIdRef.current = null;
     assistantEngine?.stop('User stopped');
     if (activeRun) {
@@ -1983,6 +2059,10 @@ function App() {
 
     assistantEngineRef.current?.pause();
     approvalController.cancelAllPending('Stop all requested');
+    setPendingTaskConfirmation(null);
+    setPendingTaskConfirmationBusy(false);
+    assistantConversationRequestIdRef.current += 1;
+    setAssistantConversationBusy(false);
     updateSettings({
       allowControlEnabled: false,
       screenPreviewEnabled: false,
@@ -2089,14 +2169,51 @@ function App() {
               : 'GORKH is thinking…';
   const userMessages = messages.filter((item) => item.role === 'user');
   const latestUserMessageText = userMessages[userMessages.length - 1]?.text ?? null;
-  const activeRunDisplayGoal = activeRun
-    ? getAssistantDisplayGoal(activeRun.goal, latestUserMessageText)
-    : null;
-  const overlayGoal = activeRun
-    ? getAssistantDisplayGoal(activeRun.goal, latestUserMessageText)
-    : latestUserMessageText;
+  const activeRunDisplayGoal = activeRun ? getRunDisplayGoal(activeRun.goal) : null;
+  const overlayGoal = activeRun ? getRunDisplayGoal(activeRun.goal) : latestUserMessageText;
   const overlayPreviewMessages = messages.slice(-4);
   const overlayWorkspaceLabel = workspaceState.configured ? workspaceState.rootName || 'Configured' : 'Not configured';
+
+  useEffect(() => {
+    if (!isSignedIn || authState !== 'signed_in' || status !== 'connected') {
+      assistantGreetingSeededRef.current = false;
+      return;
+    }
+
+    if (assistantGreetingSeededRef.current || messages.length > 0) {
+      return;
+    }
+
+    assistantGreetingSeededRef.current = true;
+    const firstGreeting = createChatItem('agent', GORKH_ONBOARDING.firstGreeting);
+    const setupMessage = !providerConfigured
+      ? createChatItem(
+          'agent',
+          llmSettings.provider === DEFAULT_LLM_PROVIDER
+            ? localAiInstallProgress?.message
+                || localAiRecommendation?.reason
+                || GORKH_ONBOARDING.freeAiNotReady
+            : GORKH_ONBOARDING.providerNotConfigured
+        )
+      : null;
+
+    setMessages((prev) => {
+      if (prev.length > 0) {
+        return prev;
+      }
+
+      return setupMessage ? [firstGreeting, setupMessage] : [firstGreeting];
+    });
+  }, [
+    authState,
+    isSignedIn,
+    llmSettings.provider,
+    localAiInstallProgress?.message,
+    localAiRecommendation?.reason,
+    messages.length,
+    providerConfigured,
+    status,
+  ]);
 
   useEffect(() => {
     if (!client || !assistantReadiness.ready) {
@@ -2117,65 +2234,6 @@ function App() {
     assistantReadiness.ready,
     client,
     startAssistantEngine,
-  ]);
-
-  useEffect(() => {
-    if (!runtimeConfig || !sessionDeviceToken || authState !== 'signed_in' || status !== 'connected') {
-      return;
-    }
-
-    if (llmSettings.provider !== DEFAULT_LLM_PROVIDER) {
-      return;
-    }
-
-    if (!assistantReadiness.ready) {
-      return;
-    }
-
-    if (desktopBootstrapBusy || (!desktopBootstrap && !desktopBootstrapError)) {
-      return;
-    }
-
-    if (assistantAutoStartAttemptedRef.current || assistantAutoStartInFlightRef.current) {
-      return;
-    }
-
-    if (activeRun && isAssistantRunActive(activeRun)) {
-      if (activeRun.mode === 'ai_assist') {
-        assistantAutoStartAttemptedRef.current = true;
-      }
-      return;
-    }
-
-    assistantAutoStartInFlightRef.current = true;
-    const freeAiReady = localAiStatus?.runtimeRunning === true && localAiStatus?.installStage === 'ready';
-    void createDesktopRun(runtimeConfig, sessionDeviceToken, {
-      goal: buildAssistantOpeningGoal(freeAiReady),
-      mode: 'ai_assist',
-    })
-      .then((run) => {
-        assistantAutoStartAttemptedRef.current = true;
-        setActiveRun(run);
-        setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, run));
-      })
-      .catch((err) => {
-        console.error('[App] Failed to auto-start assistant session:', err);
-      })
-      .finally(() => {
-        assistantAutoStartInFlightRef.current = false;
-      });
-  }, [
-    activeRun,
-    assistantReadiness.ready,
-    authState,
-    desktopBootstrap,
-    desktopBootstrapBusy,
-    desktopBootstrapError,
-    llmSettings.provider,
-    localAiStatus,
-    runtimeConfig,
-    sessionDeviceToken,
-    status,
   ]);
 
   const handleToggleAiPause = useCallback(() => {
@@ -2227,11 +2285,9 @@ function App() {
     margin: '0 auto',
     padding: '1.35rem',
     borderRadius: '32px',
-    background: isOverlayActive
-      ? 'rgba(2, 3, 5, 0.92)'
-      : platform === 'macos'
-        ? 'linear-gradient(180deg, rgba(255,255,255,0.58) 0%, rgba(241,245,249,0.52) 100%)'
-        : 'linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(248,250,252,0.96) 100%)',
+    background: platform === 'macos'
+      ? 'linear-gradient(180deg, rgba(255,255,255,0.58) 0%, rgba(241,245,249,0.52) 100%)'
+      : 'linear-gradient(180deg, rgba(255,255,255,0.98) 0%, rgba(248,250,252,0.96) 100%)',
     border: '1px solid rgba(255,255,255,0.38)',
     boxShadow: '0 34px 90px rgba(15, 23, 42, 0.18)',
     backdropFilter: shellBlur,
@@ -2650,7 +2706,7 @@ function App() {
                     }}
                   >
                     <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>
-                      {getAssistantDisplayGoal(run.goal)}
+                      {getRunDisplayGoal(run.goal)}
                     </div>
                     <div style={{ marginTop: '0.25rem', fontSize: '0.75rem', color: '#64748b' }}>
                       {run.status} • {new Date(run.createdAt).toLocaleString()}
@@ -2757,21 +2813,26 @@ function App() {
           flex: 1,
           padding: `${homeTopInset} 1.5rem 2rem`,
           overflow: 'auto',
-          opacity: isOverlayActive ? 0 : 1,
           pointerEvents: isOverlayActive ? 'none' : 'auto',
-          filter: isOverlayActive ? 'blur(18px)' : 'none',
-          transform: isOverlayActive ? 'scale(1.015)' : 'scale(1)',
-          transition: 'opacity 220ms ease, filter 220ms ease, transform 220ms ease',
           position: 'relative',
           zIndex: 1,
         }}
       >
         <div style={frameStyle}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
-            <div data-tauri-drag-region style={{ paddingLeft: platform === 'macos' ? '5.5rem' : 0, minHeight: platform === 'macos' ? '2.25rem' : undefined }}>
-              <BrandWordmark width={220} subtitle="Desktop intelligence layer" />
-            </div>
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <div style={{ position: 'relative', minHeight: platform === 'macos' ? '4.5rem' : '4rem' }}>
+            <div
+              data-tauri-drag-region
+              style={{
+                position: 'absolute',
+                inset: '0 0 auto 0',
+                height: platform === 'macos' ? '4.5rem' : '4rem',
+              }}
+            />
+            <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
+              <div style={{ paddingLeft: platform === 'macos' ? '1rem' : 0, minHeight: platform === 'macos' ? '2.25rem' : undefined }}>
+                <BrandWordmark width={220} subtitle="Desktop intelligence layer" />
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
               <button
                 onClick={handleStopAll}
                 disabled={approvalItems.every((item) => item.state !== 'pending') && !aiState?.isRunning}
@@ -2803,8 +2864,9 @@ function App() {
                   color: '#0f172a',
                 }}
               >
-                Settings
+                Open Settings
               </button>
+              </div>
             </div>
           </div>
         {runtimeConfigError && (
@@ -3198,6 +3260,7 @@ function App() {
                   messages={messages}
                   status={status}
                   onSendMessage={handleSendMessage}
+                  busy={assistantConversationBusy || pendingTaskConfirmationBusy}
                   pendingTaskConfirmation={pendingTaskConfirmation}
                   pendingTaskConfirmationBusy={pendingTaskConfirmationBusy}
                   onConfirmPendingTask={handleConfirmPendingTask}

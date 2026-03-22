@@ -11,6 +11,7 @@ interface ChatItem {
 
 interface PendingTaskConfirmation {
   goal: string;
+  summary: string;
   prompt: string;
 }
 
@@ -18,6 +19,7 @@ interface ChatOverlayProps {
   messages: ChatItem[];
   status: ConnectionStatus;
   onSendMessage: (content: string) => void;
+  busy?: boolean;
   pendingTaskConfirmation?: PendingTaskConfirmation | null;
   pendingTaskConfirmationBusy?: boolean;
   onConfirmPendingTask?: () => void;
@@ -28,6 +30,7 @@ export function ChatOverlay({
   messages,
   status,
   onSendMessage,
+  busy = false,
   pendingTaskConfirmation = null,
   pendingTaskConfirmationBusy = false,
   onConfirmPendingTask,
@@ -46,7 +49,7 @@ export function ChatOverlay({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || busy) return;
     onSendMessage(input);
     setInput('');
   };
@@ -65,7 +68,7 @@ export function ChatOverlay({
     error: '#ef4444',
   };
 
-  const canSend = status === 'connected' && input.trim();
+  const canSend = status === 'connected' && !busy && input.trim();
 
   return (
     <div
@@ -94,7 +97,7 @@ export function ChatOverlay({
         <div>
           <BrandWordmark width={132} />
           <div style={{ marginTop: '0.2rem', fontSize: '0.8125rem', color: '#475569' }}>
-            Describe what you want done. The assistant will start working from chat.
+            Describe what you want done. GORKH will explain the plan, then wait for your confirmation before starting.
           </div>
         </div>
         <span
@@ -143,7 +146,7 @@ export function ChatOverlay({
             <p style={{ margin: 0, fontWeight: 600 }}>Try asking something natural</p>
             <p style={{ margin: '0.5rem 0 0', fontSize: '0.875rem' }}>
               {status === 'connected'
-                ? 'Examples: "Organize my Downloads", "Fix tests in this repo", or "Open Photoshop and remove the background".'
+                ? 'Examples: "Organize my Downloads", "Fix tests in this repo", or "Open Photoshop and remove the background". GORKH will tell you what it plans to do before it starts.'
                 : 'The desktop needs to reconnect before the assistant can start working.'}
             </p>
           </div>
@@ -179,6 +182,9 @@ export function ChatOverlay({
             }}
           >
             <div style={{ fontWeight: 700, fontSize: '0.875rem' }}>Confirm task</div>
+            <div style={{ marginTop: '0.45rem', fontSize: '0.875rem', lineHeight: 1.5 }}>
+              {pendingTaskConfirmation.summary}
+            </div>
             <div style={{ marginTop: '0.45rem', fontSize: '0.875rem', lineHeight: 1.5 }}>
               {pendingTaskConfirmation.prompt}
             </div>
@@ -227,8 +233,14 @@ export function ChatOverlay({
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={status === 'connected' ? 'Ask the assistant to do something...' : 'Reconnect to send...'}
-          disabled={status !== 'connected'}
+          placeholder={
+            status !== 'connected'
+              ? 'Reconnect to send...'
+              : busy
+                ? 'GORKH is processing your last message...'
+                : 'Ask the assistant to do something...'
+          }
+          disabled={status !== 'connected' || busy}
           style={{
             flex: 1,
             padding: '12px 14px',

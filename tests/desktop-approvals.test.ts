@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   createApprovalController,
@@ -132,4 +133,30 @@ test('stop-all cancels all pending approvals without rewriting terminal states',
   assert.equal(itemsById.get(pendingControlId)?.state, 'canceled');
   assert.equal(itemsById.get(pendingToolId)?.state, 'canceled');
   assert.equal(itemsById.get(deniedId)?.state, 'denied');
+});
+
+test('open_app approvals summarize clearly instead of falling back to generic action text', () => {
+  assert.equal(
+    summarizeInputAction({
+      kind: 'open_app',
+      appName: 'Photoshop',
+    } as any),
+    'Open app: Photoshop'
+  );
+});
+
+test('open_app action approval surfaces describe app launches explicitly', () => {
+  const modalSource = readFileSync('apps/desktop/src/components/ActionApprovalModal.tsx', 'utf8');
+  const runPanelSource = readFileSync('apps/desktop/src/components/RunPanel.tsx', 'utf8');
+
+  assert.match(
+    modalSource,
+    /case 'open_app'[\s\S]*Open App[\s\S]*appName/,
+    'action approval modal should render open_app proposals as an app-launch approval'
+  );
+  assert.match(
+    runPanelSource,
+    /case 'open_app'[\s\S]*Open app:/,
+    'run panel should summarize open_app actions instead of showing unknown action'
+  );
 });

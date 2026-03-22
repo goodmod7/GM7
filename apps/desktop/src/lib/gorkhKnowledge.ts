@@ -198,7 +198,7 @@ export const GORKH_PERMISSION_GUIDANCE: Record<string, string> = {
 export const GORKH_ONBOARDING = {
   firstGreeting:
     "Hi — I'm GORKH, your desktop AI assistant. I can help you automate tasks on your computer, " +
-    "answer questions about my own settings and features, or guide you through setup. What would you like to do?",
+    "answer questions about my own settings and features, or guide you through setup. How can I help you today?",
 
   freeAiNotReady:
     "I notice Free AI hasn't been set up yet on this device. " +

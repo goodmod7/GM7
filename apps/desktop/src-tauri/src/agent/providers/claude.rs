@@ -143,7 +143,7 @@ impl LlmProvider for ClaudeProvider {
     async fn plan_task(&self, request: PlanRequest) -> Result<String, ProviderError> {
         let system = r#"You are a computer automation agent. Break down the user's goal into a step-by-step plan.
 
-Output format: Return a JSON array of steps with id, title, description, and type fields."#;
+Output format: Return a JSON array of steps with id, title, description, and type fields. Use open_app when the task requires launching a desktop app or browser by name."#;
 
         let user = format!(
             "Goal: {}\n\nContext: {}\n\nCreate a detailed plan:",
@@ -173,7 +173,7 @@ Output format: Return a JSON array of steps with id, title, description, and typ
     }
 
     async fn propose_next_step(&self, request: ActionRequest) -> Result<String, ProviderError> {
-        let system = r#"Based on the screen observation, propose the next action in JSON format."#;
+        let system = r#"Based on the screen observation, propose the next action in JSON format. Use open_app when the next step is to launch a desktop app or browser by name."#;
 
         let user = format!(
             "Goal: {}\n\nStep: {}\n\nObservation: {}\n\nPropose next action:",

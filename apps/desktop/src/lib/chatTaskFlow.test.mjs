@@ -1,27 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  ASSISTANT_OPENING_GOAL,
-  getAssistantDisplayGoal,
-  isAssistantOpeningGoal,
-} from './chatTaskFlow.js';
+const chatTaskFlow = await import('./chatTaskFlow.ts');
 
-test('assistant opening goal is recognized exactly', () => {
-  assert.equal(isAssistantOpeningGoal(ASSISTANT_OPENING_GOAL), true);
-  assert.equal(isAssistantOpeningGoal('Organize my Downloads'), false);
+test('assistant task confirmation responses still parse explicit confirm and cancel answers', () => {
+  assert.equal(chatTaskFlow.interpretAssistantTaskConfirmationResponse('yes'), 'confirm');
+  assert.equal(chatTaskFlow.interpretAssistantTaskConfirmationResponse('Go ahead!'), 'confirm');
+  assert.equal(chatTaskFlow.interpretAssistantTaskConfirmationResponse("don't"), 'cancel');
+  assert.equal(chatTaskFlow.interpretAssistantTaskConfirmationResponse('maybe later'), null);
 });
 
-test('assistant display goal hides the internal opening goal before first user request', () => {
+test('assistant task start confirmation depends on active execution state', () => {
+  assert.equal(chatTaskFlow.shouldConfirmAssistantTaskStart(null), true);
   assert.equal(
-    getAssistantDisplayGoal(ASSISTANT_OPENING_GOAL),
-    'Ready for your instructions'
-  );
-});
-
-test('assistant display goal prefers the real user request once available', () => {
-  assert.equal(
-    getAssistantDisplayGoal(ASSISTANT_OPENING_GOAL, 'Open Canva and edit that photo'),
-    'Open Canva and edit that photo'
+    chatTaskFlow.shouldConfirmAssistantTaskStart({
+      runId: 'run-active',
+      goal: 'Fix tests in this repo',
+      status: 'waiting_for_user',
+      createdAt: 1,
+      updatedAt: 1,
+      deviceId: 'device-1',
+      steps: [],
+    }),
+    false
   );
 });

@@ -42,6 +42,7 @@ test('desktop IPC permission allowlist matches exported Rust commands exactly', 
   const allowedCommands = extractAllowedCommands();
 
   assert.deepEqual(allowedCommands, [
+    'assistant_conversation_turn',
     'approve_agent_proposal',
     'autostart_is_enabled',
     'autostart_set_enabled',
@@ -82,6 +83,7 @@ test('desktop IPC permission allowlist matches exported Rust commands exactly', 
     'main_window_exit_overlay_mode',
     'main_window_overlay_status',
     'main_window_show',
+    'open_application',
     'open_external_url',
     'permissions_get_status',
     'permissions_open_settings',

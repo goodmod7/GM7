@@ -47,7 +47,7 @@ test('assistant chat reuses an active run before sending a message', async () =>
   assert.equal(createCalls, 0, 'existing active run should be reused');
 });
 
-test('assistant chat creates a hidden ai_assist run from the first message when no active run exists', async () => {
+test('assistant chat creates an ai_assist run for a confirmed goal when no active run exists', async () => {
   let imported: typeof import('../apps/desktop/src/lib/chatTaskFlow.ts');
   try {
     imported = await import('../apps/desktop/src/lib/chatTaskFlow.ts');
@@ -111,63 +111,79 @@ test('assistant chat decides whether a new request needs explicit confirmation b
       steps: [],
     } as never),
     false,
-    'an already-active non-warmup task should continue without a fresh confirmation gate'
-  );
-
-  assert.equal(
-    imported.shouldConfirmAssistantTaskStart({
-      runId: 'run-warmup',
-      goal: imported.ASSISTANT_OPENING_GOAL,
-      status: 'waiting_for_user',
-      createdAt: 1,
-      updatedAt: 1,
-      deviceId: 'device-1',
-      steps: [],
-    } as never),
-    true,
-    'the retail warmup session should still require confirmation before the first real task starts'
+    'an already-active task should continue without a fresh confirmation gate'
   );
 });
 
-test('assistant chat builds a plain-language confirmation prompt before a new task starts', async () => {
-  let imported: typeof import('../apps/desktop/src/lib/chatTaskFlow.ts');
-  try {
-    imported = await import('../apps/desktop/src/lib/chatTaskFlow.ts');
-  } catch {
-    assert.fail('chat task flow helper should exist');
-    return;
-  }
-
-  const confirmation = imported.createAssistantTaskConfirmation('Fix tests in this repo');
-
-  assert.equal(confirmation.goal, 'Fix tests in this repo');
-  assert.match(confirmation.prompt, /I understand you want me to/i);
-  assert.match(confirmation.prompt, /Fix tests in this repo/);
-  assert.match(confirmation.prompt, /Should I proceed\?/i);
-});
-
-test('desktop app keeps new tasks behind an explicit confirmation step in the chat surface', () => {
+test('desktop app seeds the greeting from onboarding copy and keeps fresh chat in intake first', () => {
   const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
   const chatOverlaySource = readFileSync('apps/desktop/src/components/ChatOverlay.tsx', 'utf8');
+  const knowledgeSource = readFileSync('apps/desktop/src/lib/gorkhKnowledge.ts', 'utf8');
 
+  assert.match(knowledgeSource, /GORKH_ONBOARDING/, 'onboarding knowledge should still define greeting copy');
+  assert.match(
+    appSource,
+    /GORKH_ONBOARDING\.(firstGreeting|freeAiNotReady|providerNotConfigured)/,
+    'desktop app should seed the first greeting or setup guidance from onboarding copy'
+  );
+  assert.doesNotMatch(
+    appSource,
+    /assistantReadiness\.ready[\s\S]{0,500}GORKH_ONBOARDING\.firstGreeting/,
+    'local greeting should not be gated on execution readiness checks'
+  );
+  assert.match(
+    appSource,
+    /handleSendMessage[\s\S]{0,2400}assistantConversationTurn[\s\S]{0,2400}dispatchConfirmedAssistantTask/,
+    'fresh chat should go through assistantConversationTurn before a confirmed task is dispatched'
+  );
+  assert.doesNotMatch(
+    appSource,
+    /buildAssistantOpeningGoal|assistantAutoStartAttemptedRef|assistantAutoStartInFlightRef/,
+    'desktop app should not keep the hidden assistant warmup-run machinery'
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createAssistantTaskConfirmation/,
+    'desktop app should derive confirmation from intake output instead of the old deterministic helper'
+  );
   assert.match(
     appSource,
     /pendingTaskConfirmation/,
-    'desktop app should track a pending task confirmation before starting a fresh task'
+    'desktop app should still keep new tasks behind an explicit confirmation step in chat'
   );
   assert.match(
     appSource,
-    /setPendingTaskConfirmation/,
-    'desktop app should be able to stage a confirmation prompt before run creation'
+    /confirm_task|kind === 'reply'|kind === 'confirm_task'/,
+    'desktop app should branch on the intake result before deciding whether to stage confirmation'
   );
   assert.match(
     appSource,
-    /shouldConfirmAssistantTaskStart|createAssistantTaskConfirmation/,
-    'desktop app should route new-task confirmation through the shared chat task flow helpers'
+    /if \(!trimmed \|\| assistantConversationBusy \|\| pendingTaskConfirmationBusy\)/,
+    'desktop app should reject new sends before appending a message when intake or confirmed task start is already busy'
+  );
+  assert.match(
+    appSource,
+    /llmSettings\.provider === DEFAULT_LLM_PROVIDER && startingNewTask/,
+    'managed local task gating should only run while starting a brand-new confirmed task'
+  );
+  assert.match(
+    appSource,
+    /busy=\{assistantConversationBusy \|\| pendingTaskConfirmationBusy\}/,
+    'desktop app should pass a busy signal into the chat surface while intake or task start is in flight'
   );
   assert.match(
     chatOverlaySource,
     /pendingTaskConfirmation|onConfirmPendingTask|onCancelPendingTask/,
     'main desktop chat should render explicit proceed and cancel controls while confirmation is pending'
+  );
+  assert.match(
+    chatOverlaySource,
+    /busy\?: boolean|busy = false/,
+    'chat overlay should accept a busy flag from the app'
+  );
+  assert.match(
+    chatOverlaySource,
+    /const canSend = status === 'connected' && !busy && input\.trim\(\)|disabled=\{status !== 'connected' \|\| busy\}/,
+    'chat overlay should disable sending while intake or confirmed task start is busy'
   );
 });

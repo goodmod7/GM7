@@ -57,3 +57,59 @@ test('advanced agent provider list comes from the native runtime', () => {
     'advanced-agent provider list should come from the Tauri runtime rather than a hardcoded array'
   );
 });
+
+test('advanced runtime wires open_app through parser, executor mapping, and provider prompts', () => {
+  const runtimeSource = readFileSync('apps/desktop/src-tauri/src/agent/mod.rs', 'utf8');
+  const executorSource = readFileSync('apps/desktop/src-tauri/src/agent/executor.rs', 'utf8');
+  const llmSource = readFileSync('apps/desktop/src-tauri/src/llm/mod.rs', 'utf8');
+  const nativeProviderSource = readFileSync('apps/desktop/src-tauri/src/agent/providers/native_ollama.rs', 'utf8');
+  const localCompatProviderSource = readFileSync('apps/desktop/src-tauri/src/agent/providers/local_compat.rs', 'utf8');
+  const openAiProviderSource = readFileSync('apps/desktop/src-tauri/src/agent/providers/openai.rs', 'utf8');
+  const claudeProviderSource = readFileSync('apps/desktop/src-tauri/src/agent/providers/claude.rs', 'utf8');
+
+  assert.match(
+    executorSource,
+    /OpenApp\s*\{\s*app_name:\s*String\s*\}/,
+    'advanced executor should continue to expose a concrete OpenApp action'
+  );
+  assert.match(
+    llmSource,
+    /enum InputAction[\s\S]*OpenApp\s*\{[\s\S]*app_name:\s*String,?\s*\}/,
+    'retail Rust LLM action types should include OpenApp so proposals can cross the desktop bridge'
+  );
+  assert.match(
+    runtimeSource,
+    /"open_app"/,
+    'advanced runtime parser should recognize open_app from provider JSON'
+  );
+  assert.match(
+    runtimeSource,
+    /RetailInputAction::OpenApp/,
+    'advanced runtime should create retail open_app proposals instead of rejecting them'
+  );
+  assert.match(
+    runtimeSource,
+    /executor::Action::OpenApp/,
+    'advanced runtime should map retail open_app proposals into executor::Action::OpenApp'
+  );
+  assert.match(
+    nativeProviderSource,
+    /open_app/,
+    'native Ollama provider prompt should tell the model that open_app is valid'
+  );
+  assert.match(
+    localCompatProviderSource,
+    /open_app/,
+    'local OpenAI-compatible provider prompt should tell the model that open_app is valid'
+  );
+  assert.match(
+    openAiProviderSource,
+    /open_app/,
+    'OpenAI provider prompt should tell the model that open_app is valid'
+  );
+  assert.match(
+    claudeProviderSource,
+    /open_app/,
+    'Claude provider prompt should tell the model that open_app is valid'
+  );
+});

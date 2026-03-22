@@ -92,6 +92,8 @@ export function RunPanel({
         return `Scroll (${action.dx}, ${action.dy})`;
       case 'hotkey':
         return `Press ${action.key}${action.modifiers?.length ? ' + ' + action.modifiers.join(', ') : ''}`;
+      case 'open_app':
+        return `Open app: ${action.appName}`;
       default:
         return 'Unknown action';
     }

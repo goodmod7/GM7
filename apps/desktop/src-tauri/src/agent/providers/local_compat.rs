@@ -142,7 +142,7 @@ impl LlmProvider for LocalCompatProvider {
     }
 
     async fn plan_task(&self, request: PlanRequest) -> Result<String, ProviderError> {
-        let system = "You are a computer automation agent. Break down the user's goal into a step-by-step plan. Return JSON array of steps.";
+        let system = "You are a computer automation agent. Break down the user's goal into a step-by-step plan. Return JSON array of steps. Use open_app when the task requires launching a desktop app or browser by name.";
 
         let user = format!(
             "Goal: {}\n\nContext: {}\n\nCreate a detailed plan:",
@@ -174,7 +174,7 @@ Since you cannot see the image directly, the user has described it for you."#;
     }
 
     async fn propose_next_step(&self, request: ActionRequest) -> Result<String, ProviderError> {
-        let system = "Based on the screen observation, propose the next action in JSON format.";
+        let system = "Based on the screen observation, propose the next action in JSON format. Use open_app when the next step is to launch a desktop app or browser by name.";
 
         let user = format!(
             "Goal: {}\n\nStep: {}\n\nObservation: {}\n\nPropose next action:",

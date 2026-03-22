@@ -163,7 +163,7 @@ fn detect_accessibility_status() -> PermissionState {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_display_point, DisplayBounds};
+    use super::{resolve_display_point, ConversationTurnRequest, DisplayBounds, ProposalRequest};
 
     #[test]
     fn resolve_display_point_keeps_primary_display_coordinates_stable() {
@@ -187,6 +187,52 @@ mod tests {
         };
 
         assert_eq!(resolve_display_point(0.25, 0.6, bounds), (1940, -300));
+    }
+
+    #[test]
+    fn proposal_request_deserializes_camel_case_fields() {
+        let parsed: ProposalRequest = serde_json::from_value(serde_json::json!({
+            "provider": "native_qwen_ollama",
+            "baseUrl": "http://127.0.0.1:11434",
+            "model": "qwen2.5:3b",
+            "goal": "Do the thing",
+            "constraints": {
+                "maxActions": 5,
+                "maxRuntimeMinutes": 10
+            },
+            "workspaceConfigured": true,
+            "appContext": "ready"
+        }))
+        .expect("proposal request should deserialize camelCase fields");
+
+        assert_eq!(parsed.base_url, "http://127.0.0.1:11434");
+        assert_eq!(parsed.app_context.as_deref(), Some("ready"));
+        assert_eq!(parsed.workspace_configured, Some(true));
+        assert_eq!(parsed.constraints.max_actions, 5);
+        assert_eq!(parsed.constraints.max_runtime_minutes, 10);
+    }
+
+    #[test]
+    fn conversation_turn_request_deserializes_camel_case_fields() {
+        let parsed: ConversationTurnRequest = serde_json::from_value(serde_json::json!({
+            "provider": "native_qwen_ollama",
+            "baseUrl": "http://127.0.0.1:11434",
+            "model": "qwen2.5:3b",
+            "messages": [
+                {
+                    "role": "user",
+                    "text": "Hi"
+                }
+            ],
+            "appContext": "desktop-ready"
+        }))
+        .expect("conversation turn request should deserialize camelCase fields");
+
+        assert_eq!(parsed.base_url, "http://127.0.0.1:11434");
+        assert_eq!(parsed.app_context.as_deref(), Some("desktop-ready"));
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].role, "user");
+        assert_eq!(parsed.messages[0].text, "Hi");
     }
 }
 
@@ -1308,6 +1354,92 @@ fn open_external_url(app: AppHandle, url: String) -> KeyResult {
     }
 }
 
+fn launch_app_by_name(app_name: &str) -> Result<(), String> {
+    let trimmed = app_name.trim();
+    if trimmed.is_empty() {
+        return Err("Application name cannot be empty".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg("-a")
+            .arg(trimmed)
+            .status()
+            .map_err(|e| format!("Failed to launch application: {}", e))?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        return Err(format!("Application launcher exited with status {}", status));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "start", "", trimmed])
+            .status()
+            .map_err(|e| format!("Failed to launch application: {}", e))?;
+
+        if status.success() {
+            return Ok(());
+        }
+
+        return Err(format!("Application launcher exited with status {}", status));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let candidates = [
+            trimmed.to_string(),
+            trimmed.to_ascii_lowercase(),
+            trimmed.to_ascii_lowercase().replace(' ', "-"),
+            trimmed.to_ascii_lowercase().replace(' ', ""),
+        ];
+
+        for candidate in candidates {
+            let mut launched = false;
+
+            if let Ok(status) = std::process::Command::new("gtk-launch")
+                .arg(&candidate)
+                .status()
+            {
+                launched = status.success();
+            }
+
+            if launched {
+                return Ok(());
+            }
+        }
+
+        Err(format!(
+            "Failed to launch application '{}'. Try installing a desktop launcher or use a full app id.",
+            trimmed
+        ))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = trimmed;
+        Err("Application launch is not supported on this platform".to_string())
+    }
+}
+
+#[tauri::command]
+fn open_application(app_name: String) -> KeyResult {
+    match launch_app_by_name(&app_name) {
+        Ok(()) => KeyResult {
+            ok: true,
+            error: None,
+        },
+        Err(error) => KeyResult {
+            ok: false,
+            error: Some(error),
+        },
+    }
+}
+
 #[tauri::command]
 async fn desktop_auth_listen_start(
     runtime: State<'_, DesktopAuthRuntimeState>,
@@ -1530,6 +1662,7 @@ fn clear_llm_api_key(provider: String) -> KeyResult {
 // ============================================================================
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProposalRequest {
     provider: String,
     base_url: String,
@@ -1559,22 +1692,24 @@ struct ProposalError {
     message: String,
 }
 
-#[tauri::command]
-async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResult, ProposalError> {
-    let api_key = match params.provider.as_str() {
+fn resolve_llm_api_key(provider: &str) -> Result<String, ProposalError> {
+    match provider {
         "native_qwen_ollama" | "openai_compat" => {
-            keyring_get_secret(&format!("llm_api_key:{}", params.provider)).unwrap_or_default()
+            Ok(keyring_get_secret(&format!("llm_api_key:{}", provider)).unwrap_or_default())
         }
         "openai" | "claude" | "deepseek" | "minimax" | "kimi" => {
-            keyring_get_secret(&format!("llm_api_key:{}", params.provider)).ok_or_else(|| {
-                ProposalError {
-                    code: "NO_API_KEY".to_string(),
-                    message: "No API key configured".to_string(),
-                }
-            })?
+            keyring_get_secret(&format!("llm_api_key:{}", provider)).ok_or_else(|| ProposalError {
+                code: "NO_API_KEY".to_string(),
+                message: "No API key configured".to_string(),
+            })
         }
-        _ => String::new(),
-    };
+        _ => Ok(String::new()),
+    }
+}
+
+#[tauri::command]
+async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResult, ProposalError> {
+    let api_key = resolve_llm_api_key(&params.provider)?;
 
     // Get workspace configuration status
     let workspace_configured = params.workspace_configured.or_else(|| {
@@ -1608,6 +1743,53 @@ async fn llm_propose_next_action(params: ProposalRequest) -> Result<ProposalResu
         })?;
 
     Ok(ProposalResult { proposal })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversationTurnRequest {
+    provider: String,
+    base_url: String,
+    model: String,
+    messages: Vec<llm::ConversationTurnMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_context: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ConversationTurnResponse {
+    #[serde(flatten)]
+    result: llm::ConversationTurnResult,
+}
+
+#[tauri::command]
+async fn assistant_conversation_turn(
+    params: ConversationTurnRequest,
+) -> Result<ConversationTurnResponse, ProposalError> {
+    let api_key = resolve_llm_api_key(&params.provider)?;
+    let conversation_params = llm::ConversationTurnParams {
+        provider: params.provider,
+        base_url: params.base_url,
+        model: params.model,
+        api_key,
+        messages: params.messages,
+        app_context: params.app_context,
+    };
+
+    let provider = llm::create_provider(&conversation_params.provider).map_err(|e| ProposalError {
+        code: e.code,
+        message: e.message,
+    })?;
+
+    let result = provider
+        .conversation_turn(&conversation_params)
+        .await
+        .map_err(|e| ProposalError {
+            code: e.code,
+            message: e.message,
+        })?;
+
+    Ok(ConversationTurnResponse { result })
 }
 
 #[tauri::command]
@@ -2081,6 +2263,7 @@ pub fn run() {
             input_scroll,
             input_type,
             input_hotkey,
+            open_application,
             device_token_set,
             device_token_get,
             device_token_clear,
@@ -2104,6 +2287,7 @@ pub fn run() {
             has_llm_api_key,
             clear_llm_api_key,
             llm_propose_next_action,
+            assistant_conversation_turn,
             local_ai_status,
             local_ai_install_start,
             local_ai_enable_vision_boost,

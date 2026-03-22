@@ -48,6 +48,29 @@ test('shared protocol rejects malformed terminal tool payloads', async () => {
   assert.equal(parsed.success, false);
 });
 
+test('shared protocol accepts open_app actions in device.action.create payloads', async () => {
+  const { PROTOCOL_VERSION, parseDeviceMessage } = await import('../packages/shared/dist/index.js');
+
+  const parsed = parseDeviceMessage({
+    v: PROTOCOL_VERSION,
+    type: 'device.action.create',
+    ts: Date.now(),
+    payload: {
+      deviceId: 'device-1',
+      actionId: 'action-1',
+      runId: 'run-1',
+      action: {
+        kind: 'open_app',
+        appName: 'Photoshop',
+      },
+      source: 'agent',
+      createdAt: Date.now(),
+    },
+  });
+
+  assert.equal(parsed.success, true);
+});
+
 test('createServerMessage always stamps the current protocol version', async () => {
   const { PROTOCOL_VERSION, createServerMessage } = await import('../packages/shared/dist/index.js');
 

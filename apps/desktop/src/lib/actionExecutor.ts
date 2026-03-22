@@ -47,6 +47,12 @@ export async function executeAction(action: InputAction, displayId: string = 'di
         });
         return { ok: true };
 
+      case 'open_app':
+        await invoke('open_application', {
+          appName: action.appName,
+        });
+        return { ok: true };
+
       default:
         return {
           ok: false,
@@ -55,7 +61,7 @@ export async function executeAction(action: InputAction, displayId: string = 'di
     }
   } catch (e) {
     const err = e as { message?: string };
-    const msg = err.message || 'Input injection failed';
+    const msg = err.message || 'Action execution failed';
     
     // Check for permission errors
     const needsPermission = msg.includes('permission') || 

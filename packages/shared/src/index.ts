@@ -188,7 +188,18 @@ export interface HotkeyAction {
   modifiers?: Modifier[];
 }
 
-export type InputAction = ClickAction | DoubleClickAction | ScrollAction | TypeAction | HotkeyAction;
+export interface OpenAppAction {
+  kind: 'open_app';
+  appName: string;
+}
+
+export type InputAction =
+  | ClickAction
+  | DoubleClickAction
+  | ScrollAction
+  | TypeAction
+  | HotkeyAction
+  | OpenAppAction;
 
 export interface ActionError {
   code: string;
@@ -220,6 +231,8 @@ export function redactActionForLog(action: InputAction): string {
       return `scroll (${action.dx}, ${action.dy})`;
     case 'hotkey':
       return `hotkey (${action.key}${action.modifiers?.length ? ' + ' + action.modifiers.join(',') : ''})`;
+    case 'open_app':
+      return `open_app (${action.appName})`;
     default:
       return 'unknown';
   }
@@ -990,12 +1003,18 @@ const hotkeyActionSchema = z.object({
   modifiers: z.array(z.enum(['shift', 'ctrl', 'alt', 'meta'])).optional(),
 });
 
+const openAppActionSchema = z.object({
+  kind: z.literal('open_app'),
+  appName: z.string().min(1).max(120),
+});
+
 const inputActionSchema = z.union([
   clickActionSchema,
   doubleClickActionSchema,
   scrollActionSchema,
   typeActionSchema,
   hotkeyActionSchema,
+  openAppActionSchema,
 ]);
 
 const proposeActionProposalSchema = z.object({

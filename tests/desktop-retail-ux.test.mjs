@@ -28,6 +28,7 @@ test('desktop main surface emphasizes assistant chat and task progress instead o
 test('desktop retail onboarding uses guided free-AI setup copy on the main surface and hides provider details behind advanced settings', () => {
   const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
   const freeAiSource = readFileSync('apps/desktop/src/components/FreeAiSetupCard.tsx', 'utf8');
+  const settingsSource = readFileSync('apps/desktop/src/components/SettingsPanel.tsx', 'utf8');
 
   assert.match(
     appSource,
@@ -49,6 +50,11 @@ test('desktop retail onboarding uses guided free-AI setup copy on the main surfa
     freeAiSource,
     /Set Up Free AI|Installing local engine|Downloading AI model|Repair Free AI/i,
     'free AI setup card should describe the guided install flow in plain product language'
+  );
+  assert.match(
+    settingsSource,
+    /Restart to update|Downloading update|Preparing update/i,
+    'desktop settings should surface background updater progress and restart-to-update copy'
   );
   assert.doesNotMatch(
     freeAiSource,

@@ -191,4 +191,9 @@ test('desktop app seeds the greeting from onboarding copy and keeps fresh chat i
     /const canSend = status === 'connected' && !busy && input\.trim\(\)|disabled=\{status !== 'connected' \|\| busy\}/,
     'chat overlay should disable sending while intake, setup, or confirmed task start is busy'
   );
+  assert.match(
+    appSource,
+    /desktopUpdater|shouldAutoCheckDesktopUpdates|checkForDesktopUpdate|Restart to update/,
+    'desktop app should wire a stable background updater flow into the shell instead of leaving update checks settings-only'
+  );
 });

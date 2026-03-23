@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, type CSSProperties } from 're
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Effect, EffectState, getCurrentWindow } from '@tauri-apps/api/window';
+import type { Update as DesktopUpdate } from '@tauri-apps/plugin-updater';
 import type { ServerMessage, ServerChatMessage, RunWithSteps, ApprovalRequest, InputAction, AgentProposal } from '@ai-operator/shared';
 import { WsClient, type ConnectionStatus } from './lib/wsClient.js';
 import { executeAction } from './lib/actionExecutor.js';
@@ -88,6 +89,15 @@ import {
 import { getWorkspaceState, type LocalWorkspaceState } from './lib/workspace.js';
 import { getSettings, setSetting, subscribe, updateSettings, type LocalSettingsState } from './lib/localSettings.js';
 import {
+  checkForDesktopUpdate,
+  closeDesktopUpdate,
+  createIdleDesktopUpdaterState,
+  downloadDesktopUpdate,
+  installDownloadedDesktopUpdate,
+  shouldAutoCheckDesktopUpdates,
+  type DesktopUpdaterState,
+} from './lib/desktopUpdater.js';
+import {
   evaluateDesktopTaskReadiness,
   getDesktopControlExecutionBlocker,
 } from './lib/taskReadiness.js';
@@ -127,6 +137,7 @@ function getOrCreateDeviceId(): string {
 const LEGACY_DEVICE_TOKEN_KEY = 'ai-operator-device-token';
 const LLM_SETTINGS_STORAGE_KEY = 'ai-operator-settings';
 const DESKTOP_APP_VERSION = __GORKH_DESKTOP_VERSION__;
+const DESKTOP_UPDATER_ENABLED = import.meta.env.VITE_DESKTOP_UPDATER_ENABLED === 'true';
 
 async function getStoredDeviceToken(deviceId: string): Promise<string | undefined> {
   const token = await invoke<string | null>('device_token_get', { deviceId });
@@ -357,6 +368,10 @@ function App() {
   const [permissionHintTarget, setPermissionHintTarget] = useState<PermissionTarget | null>(null);
   const [permissionHintMessage, setPermissionHintMessage] = useState<string | null>(null);
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<string | null>(null);
+  const [desktopUpdaterState, setDesktopUpdaterState] = useState<DesktopUpdaterState>(() =>
+    createIdleDesktopUpdaterState(DESKTOP_APP_VERSION)
+  );
+  const [backgroundDesktopUpdateCheckStarted, setBackgroundDesktopUpdateCheckStarted] = useState(false);
 
   // Iteration 6: AI Assist state
   const assistantEngineCatalog = getAssistantEngineCatalog();
@@ -392,6 +407,8 @@ function App() {
   const assistantStartingRunIdRef = useRef<string | null>(null);
   const assistantConversationRequestIdRef = useRef(0);
   const [assistantConversationBusy, setAssistantConversationBusy] = useState(false);
+  const desktopUpdateRef = useRef<DesktopUpdate | null>(null);
+  const desktopUpdaterActionBusyRef = useRef(false);
   const clientRef = useRef<WsClient | null>(null);
   const controlApprovalPayloadsRef = useRef(new Map<string, PendingControlApprovalPayload>());
   const proposalApprovalPayloadsRef = useRef(new Map<string, PendingProposalPayload>());
@@ -526,6 +543,85 @@ function App() {
       setDiagnosticsStatus(err instanceof Error ? err.message : 'Failed to copy diagnostics.');
     }
   }, [permissionStatus]);
+
+  const replaceDesktopUpdateHandle = useCallback(async (nextUpdate: DesktopUpdate | null) => {
+    const previousUpdate = desktopUpdateRef.current;
+    desktopUpdateRef.current = nextUpdate;
+
+    if (previousUpdate && previousUpdate !== nextUpdate) {
+      await closeDesktopUpdate(previousUpdate);
+    }
+  }, []);
+
+  const runDesktopUpdateCheck = useCallback(async (checkedInBackground: boolean) => {
+    if (!DESKTOP_UPDATER_ENABLED || desktopUpdaterActionBusyRef.current) {
+      return;
+    }
+
+    desktopUpdaterActionBusyRef.current = true;
+    setDesktopUpdaterState((current) => ({
+      ...current,
+      status: 'checking',
+      progressPercent: null,
+      bytesDownloaded: null,
+      bytesTotal: null,
+      error: null,
+      restartReady: false,
+      checkedInBackground,
+    }));
+
+    try {
+      const result = await checkForDesktopUpdate({
+        currentVersion: DESKTOP_APP_VERSION,
+        checkedInBackground,
+      });
+
+      if (!result.update) {
+        await replaceDesktopUpdateHandle(null);
+        setDesktopUpdaterState(result.state);
+        return;
+      }
+
+      await replaceDesktopUpdateHandle(result.update);
+      const downloadedState = await downloadDesktopUpdate({
+        currentVersion: DESKTOP_APP_VERSION,
+        update: result.update,
+        checkedInBackground,
+        onStateChange: setDesktopUpdaterState,
+      });
+
+      if (downloadedState.status === 'error') {
+        await replaceDesktopUpdateHandle(null);
+      }
+
+      setDesktopUpdaterState(downloadedState);
+    } finally {
+      desktopUpdaterActionBusyRef.current = false;
+    }
+  }, [replaceDesktopUpdateHandle]);
+
+  const handleRestartToUpdate = useCallback(async () => {
+    const pendingUpdate = desktopUpdateRef.current;
+    if (!pendingUpdate || !desktopUpdaterState.restartReady) {
+      return;
+    }
+
+    setDesktopUpdaterState((current) => ({
+      ...current,
+      status: 'installing',
+      error: null,
+    }));
+
+    try {
+      await installDownloadedDesktopUpdate(pendingUpdate);
+    } catch (err) {
+      setDesktopUpdaterState((current) => ({
+        ...current,
+        status: 'error',
+        error: parseDesktopError(err, 'Failed to install update').message,
+      }));
+    }
+  }, [desktopUpdaterState.restartReady]);
 
   const handleApprovalEvent = useCallback((event?: ApprovalChangeEvent) => {
     if (!event) {
@@ -875,6 +971,31 @@ function App() {
       clearTimeout(timer);
     };
   }, [diagnosticsStatus]);
+
+  useEffect(() => {
+    if (!shouldAutoCheckDesktopUpdates({
+      updaterEnabled: DESKTOP_UPDATER_ENABLED,
+      backgroundCheckStarted: backgroundDesktopUpdateCheckStarted,
+    })) {
+      return undefined;
+    }
+
+    setBackgroundDesktopUpdateCheckStarted(true);
+    const timer = window.setTimeout(() => {
+      void runDesktopUpdateCheck(true);
+    }, 2500);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [backgroundDesktopUpdateCheckStarted, runDesktopUpdateCheck]);
+
+  useEffect(() => {
+    return () => {
+      void closeDesktopUpdate(desktopUpdateRef.current);
+      desktopUpdateRef.current = null;
+    };
+  }, []);
 
   // Initialize client on mount
   useEffect(() => {
@@ -3859,14 +3980,15 @@ function App() {
           onScreenPreviewToggle={handleScreenPreviewToggle}
           onAllowControlToggle={handleControlToggle}
           onWorkspaceChange={handleWorkspaceChange}
-          apiHttpBase={runtimeConfig?.httpBase || null}
-          runtimeConfigError={runtimeConfigError}
           permissionStatus={permissionStatus}
           permissionStatusBusy={permissionStatusBusy}
           onRefreshPermissionStatus={refreshPermissionStatus}
           onOpenPermissionSettings={handleOpenPermissionSettings}
           permissionHintTarget={permissionHintTarget}
           permissionHintMessage={permissionHintMessage}
+          desktopUpdaterState={desktopUpdaterState}
+          onCheckForUpdates={() => runDesktopUpdateCheck(false)}
+          onRestartToUpdate={handleRestartToUpdate}
           onExportDiagnostics={handleExportDiagnostics}
           diagnosticsStatus={diagnosticsStatus}
           overviewPanels={settingsOperationalPanels}

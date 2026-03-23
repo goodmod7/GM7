@@ -1,5 +1,4 @@
 import { useState, useEffect, type ReactNode } from 'react';
-import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import {
   clearWorkspace,
@@ -25,6 +24,10 @@ import {
   type LlmProvider,
   type LlmSettings,
 } from '../lib/llmConfig.js';
+import {
+  getDesktopUpdaterStatusMessage,
+  type DesktopUpdaterState,
+} from '../lib/desktopUpdater.js';
 import { parseDesktopError } from '../lib/tauriError.js';
 import { BrandWordmark } from './BrandWordmark.js';
 
@@ -46,14 +49,15 @@ interface SettingsPanelProps {
   onScreenPreviewToggle: (enabled: boolean) => void;
   onAllowControlToggle: (enabled: boolean) => void;
   onWorkspaceChange?: (state: WorkspaceState) => void;
-  apiHttpBase: string | null;
-  runtimeConfigError?: string | null;
   permissionStatus: NativePermissionStatus;
   permissionStatusBusy?: boolean;
   onRefreshPermissionStatus: () => void | Promise<void>;
   onOpenPermissionSettings: (target: PermissionTarget) => void | Promise<void>;
   permissionHintTarget?: PermissionTarget | null;
   permissionHintMessage?: string | null;
+  desktopUpdaterState: DesktopUpdaterState;
+  onCheckForUpdates: () => void | Promise<void>;
+  onRestartToUpdate: () => void | Promise<void>;
   onExportDiagnostics: () => void | Promise<void>;
   diagnosticsStatus?: string | null;
   overviewPanels?: ReactNode;
@@ -73,14 +77,15 @@ export function SettingsPanel({
   onScreenPreviewToggle,
   onAllowControlToggle,
   onWorkspaceChange,
-  apiHttpBase,
-  runtimeConfigError,
   permissionStatus,
   permissionStatusBusy = false,
   onRefreshPermissionStatus,
   onOpenPermissionSettings,
   permissionHintTarget,
   permissionHintMessage,
+  desktopUpdaterState,
+  onCheckForUpdates,
+  onRestartToUpdate,
   onExportDiagnostics,
   diagnosticsStatus,
   overviewPanels,
@@ -96,8 +101,7 @@ export function SettingsPanel({
   const [hasKey, setHasKey] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [updateResult, setUpdateResult] = useState<{ success: boolean; message: string } | null>(null);
-  
+
   // Workspace state
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState>({ configured: false });
   const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
@@ -286,61 +290,41 @@ export function SettingsPanel({
     }
   };
 
-  const detectUpdateTarget = async (): Promise<{ platform: string; arch: string; currentVersion: string }> => {
-    const currentVersion = await getVersion();
-    const userAgent = navigator.userAgent.toLowerCase();
-    const platform = userAgent.includes('win') ? 'windows' : 'darwin';
-    const arch = platform === 'windows'
-      ? 'x86_64'
-      : userAgent.includes('arm') || userAgent.includes('aarch64') || userAgent.includes('apple')
-      ? 'aarch64'
-      : 'x86_64';
-
-    return { platform, arch, currentVersion };
-  };
-
-  const handleCheckForUpdates = async () => {
-    setIsLoading(true);
-    setUpdateResult(null);
-
-    try {
-      if (!UPDATER_ENABLED) {
-        setUpdateResult({ success: true, message: 'Updater is disabled in this environment.' });
-        return;
+  const updaterBusy =
+    desktopUpdaterState.status === 'checking'
+    || desktopUpdaterState.status === 'downloading'
+    || desktopUpdaterState.status === 'installing';
+  const updaterPrimaryActionLabel = !UPDATER_ENABLED
+    ? 'Updater disabled in this build'
+    : desktopUpdaterState.restartReady
+      ? desktopUpdaterState.status === 'installing'
+        ? 'Restarting...'
+        : 'Restart to update'
+      : desktopUpdaterState.status === 'downloading'
+        ? 'Downloading update...'
+        : desktopUpdaterState.status === 'checking'
+          ? 'Preparing update...'
+          : 'Check for Updates';
+  const updaterStatusMessage = !UPDATER_ENABLED
+    ? 'Updater is disabled in this environment.'
+    : getDesktopUpdaterStatusMessage(desktopUpdaterState);
+  const updaterStatusTone = desktopUpdaterState.status === 'error'
+    ? {
+        backgroundColor: '#fef2f2',
+        borderColor: '#fecaca',
+        color: '#991b1b',
       }
-
-      if (!apiHttpBase) {
-        throw new Error(runtimeConfigError || 'Desktop API configuration is invalid. Refusing to check updates.');
-      }
-
-      const target = await detectUpdateTarget();
-      const response = await fetch(
-        `${apiHttpBase}/updates/desktop/${target.platform}/${target.arch}/${encodeURIComponent(target.currentVersion)}.json`
-      );
-
-      if (!response.ok) {
-        throw new Error(`Update feed unavailable (${response.status})`);
-      }
-
-      const manifest = await response.json() as { version?: string; notes?: string };
-      if (!manifest.version || manifest.version === target.currentVersion) {
-        setUpdateResult({ success: true, message: 'You are up to date.' });
-        return;
-      }
-
-      setUpdateResult({
-        success: true,
-        message: `Update available: ${manifest.version}${manifest.notes ? ` - ${manifest.notes}` : ''}`,
-      });
-    } catch (e) {
-      setUpdateResult({
-        success: false,
-        message: parseDesktopError(e, 'Failed to check for updates').message,
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    : desktopUpdaterState.status === 'downloaded'
+      ? {
+          backgroundColor: '#ecfdf5',
+          borderColor: '#86efac',
+          color: '#166534',
+        }
+      : {
+          backgroundColor: '#eff6ff',
+          borderColor: '#bfdbfe',
+          color: '#1d4ed8',
+        };
 
   if (!isOpen) return null;
 
@@ -1016,57 +1000,79 @@ export function SettingsPanel({
             ⬆️ Desktop Updates
           </h3>
           <p style={{ margin: '0 0 1rem', fontSize: '0.875rem', color: '#666' }}>
-            Signed release builds are configured to use the Tauri updater feed. In development, updater checks can be disabled.
+            Stable releases check for signed updates in the background, download them for you, and wait for your restart confirmation.
           </p>
-          {runtimeConfigError && (
-            <div
-              style={{
-                marginBottom: '1rem',
-                padding: '0.75rem',
-                backgroundColor: '#fef2f2',
-                border: '1px solid #fecaca',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                color: '#991b1b',
-              }}
-            >
-              {runtimeConfigError}
-            </div>
-          )}
+          <div style={{ marginBottom: '0.75rem', fontSize: '0.8125rem', color: '#4b5563' }}>
+            Current version: {desktopUpdaterState.currentVersion}
+            {desktopUpdaterState.nextVersion ? ` • Update ready: ${desktopUpdaterState.nextVersion}` : ''}
+          </div>
           <button
             onClick={() => {
-              void handleCheckForUpdates();
+              if (desktopUpdaterState.restartReady) {
+                void onRestartToUpdate();
+                return;
+              }
+              void onCheckForUpdates();
             }}
-            disabled={isLoading || !apiHttpBase}
+            disabled={!UPDATER_ENABLED || updaterBusy}
             style={{
               width: '100%',
               padding: '0.75rem',
-              backgroundColor: isLoading || !apiHttpBase ? '#d1d5db' : '#111827',
+              backgroundColor: !UPDATER_ENABLED || updaterBusy ? '#d1d5db' : '#111827',
               color: 'white',
               border: 'none',
               borderRadius: '4px',
-              cursor: isLoading || !apiHttpBase ? 'not-allowed' : 'pointer',
+              cursor: !UPDATER_ENABLED || updaterBusy ? 'not-allowed' : 'pointer',
               fontSize: '0.875rem',
               fontWeight: 500,
             }}
           >
-            {isLoading ? 'Checking...' : 'Check for Updates'}
+            {updaterPrimaryActionLabel}
           </button>
-          {updateResult && (
-            <div
-              style={{
-                marginTop: '1rem',
-                padding: '0.75rem',
-                backgroundColor: updateResult.success ? '#f0fdf4' : '#fef2f2',
-                border: `1px solid ${updateResult.success ? '#86efac' : '#fecaca'}`,
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                color: updateResult.success ? '#166534' : '#991b1b',
-              }}
-            >
-              {updateResult.message}
-            </div>
-          )}
+          <div
+            style={{
+              marginTop: '1rem',
+              padding: '0.75rem',
+              backgroundColor: updaterStatusTone.backgroundColor,
+              border: `1px solid ${updaterStatusTone.borderColor}`,
+              borderRadius: '4px',
+              fontSize: '0.875rem',
+              color: updaterStatusTone.color,
+            }}
+          >
+            {updaterStatusMessage}
+            {desktopUpdaterState.notes ? (
+              <div style={{ marginTop: '0.5rem', fontSize: '0.8125rem', color: '#475569' }}>
+                {desktopUpdaterState.notes}
+              </div>
+            ) : null}
+            {desktopUpdaterState.bytesTotal ? (
+              <div style={{ marginTop: '0.5rem', fontSize: '0.8125rem', color: '#475569' }}>
+                {desktopUpdaterState.bytesDownloaded ?? 0} / {desktopUpdaterState.bytesTotal} bytes
+              </div>
+            ) : null}
+            {desktopUpdaterState.status === 'downloading' && desktopUpdaterState.progressPercent !== null ? (
+              <div style={{ marginTop: '0.75rem' }}>
+                <div
+                  style={{
+                    width: '100%',
+                    height: '8px',
+                    backgroundColor: '#dbeafe',
+                    borderRadius: '999px',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${desktopUpdaterState.progressPercent}%`,
+                      height: '100%',
+                      backgroundColor: '#2563eb',
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         {/* Close button */}

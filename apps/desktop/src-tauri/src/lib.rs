@@ -1669,6 +1669,8 @@ struct ProposalRequest {
     model: String,
     goal: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     screenshot_png_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     history: Option<llm::ActionHistory>,
@@ -1726,7 +1728,10 @@ async fn llm_propose_next_action(
     params: ProposalRequest,
     local_ai_state: State<'_, local_ai::LocalAiRuntimeState>,
 ) -> Result<ProposalResult, ProposalError> {
-    let api_key = resolve_llm_api_key(&params.provider)?;
+    let api_key = params
+        .api_key_override
+        .clone()
+        .unwrap_or(resolve_llm_api_key(&params.provider)?);
 
     // Get workspace configuration status
     let workspace_configured = params.workspace_configured.or_else(|| {
@@ -1827,6 +1832,8 @@ struct ConversationTurnRequest {
     model: String,
     messages: Vec<llm::ConversationTurnMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     app_context: Option<String>,
 }
 
@@ -1841,7 +1848,10 @@ async fn assistant_conversation_turn(
     params: ConversationTurnRequest,
     local_ai_state: State<'_, local_ai::LocalAiRuntimeState>,
 ) -> Result<ConversationTurnResponse, ProposalError> {
-    let api_key = resolve_llm_api_key(&params.provider)?;
+    let api_key = params
+        .api_key_override
+        .clone()
+        .unwrap_or(resolve_llm_api_key(&params.provider)?);
     let conversation_params = llm::ConversationTurnParams {
         provider: params.provider,
         base_url: params.base_url,
@@ -2122,7 +2132,7 @@ async fn is_agent_provider_available(provider_type: &str) -> Result<bool, String
             Ok(provider.is_available().await)
         }
         ProviderType::LocalOpenAiCompat => {
-            let provider = agent::providers::LocalCompatProvider::new(None, None);
+            let provider = agent::providers::LocalCompatProvider::new(None, None, None, None);
             Ok(provider.is_available().await)
         }
         ProviderType::OpenAi | ProviderType::Claude => {
@@ -2187,6 +2197,8 @@ async fn start_agent_task(
     credential_provider: Option<String>,
     provider_base_url: Option<String>,
     provider_model: Option<String>,
+    provider_api_key: Option<String>,
+    provider_supports_vision: Option<bool>,
     display_id: Option<String>,
     // Structured GORKH app state for grounding — injected before the goal so the planner
     // sees current app state without the model needing to guess.
@@ -2195,12 +2207,12 @@ async fn start_agent_task(
     let provider_name = preferred_provider.unwrap_or_else(|| "native_qwen_ollama".to_string());
     let primary_provider = agent_provider_kind(&provider_name)?;
     let key_provider = credential_provider.unwrap_or_else(|| provider_name.clone());
-    let provider_api_key = match primary_provider {
+    let resolved_provider_api_key = provider_api_key.or_else(|| match primary_provider {
         ProviderType::OpenAi | ProviderType::Claude => {
             keyring_get_secret(&format!("llm_api_key:{}", key_provider))
         }
         _ => None,
-    };
+    });
 
     // Create agent config
     let config = AgentConfig {
@@ -2208,7 +2220,8 @@ async fn start_agent_task(
         provider_base_url,
         provider_model,
         display_id: display_id.unwrap_or_else(|| "display-0".to_string()),
-        provider_api_key,
+        provider_api_key: resolved_provider_api_key,
+        provider_supports_vision,
         ..Default::default()
     };
 

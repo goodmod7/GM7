@@ -449,6 +449,69 @@ function getBillingSnapshot(user: {
   };
 }
 
+function hostedFreeAiFallbackAvailable(): boolean {
+  return config.FREE_AI_FALLBACK_ENABLED
+    && config.FREE_AI_FALLBACK_BASE_URL.trim().length > 0
+    && config.FREE_AI_FALLBACK_MODEL.trim().length > 0;
+}
+
+function buildHostedFreeAiUnavailableReply(reply: FastifyReply) {
+  reply.status(503);
+  return reply.send({
+    error: 'Hosted Free AI fallback is unavailable.',
+    code: 'FREE_AI_FALLBACK_UNAVAILABLE',
+  });
+}
+
+function buildHostedFreeAiUpstreamUrl(path: string): string {
+  const trimmedBase = config.FREE_AI_FALLBACK_BASE_URL.replace(/\/+$/, '');
+  const normalizedBase = trimmedBase.endsWith('/v1') ? trimmedBase : `${trimmedBase}/v1`;
+  return `${normalizedBase}/${path}`;
+}
+
+function requestContainsHostedFreeAiImageContent(messages: unknown): boolean {
+  if (!Array.isArray(messages)) {
+    return false;
+  }
+
+  return messages.some((message) => {
+    if (!message || typeof message !== 'object') {
+      return false;
+    }
+
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      return false;
+    }
+
+    return content.some((item) => {
+      if (!item || typeof item !== 'object') {
+        return false;
+      }
+
+      return (item as { type?: unknown }).type === 'image_url';
+    });
+  });
+}
+
+function selectHostedFreeAiModel(body: Record<string, unknown>): string {
+  const wantsVision = requestContainsHostedFreeAiImageContent(body.messages);
+  if (wantsVision && config.FREE_AI_FALLBACK_VISION_MODEL.trim().length > 0) {
+    return config.FREE_AI_FALLBACK_VISION_MODEL.trim();
+  }
+
+  return config.FREE_AI_FALLBACK_MODEL.trim();
+}
+
+function buildHostedFreeAiModelList(): string[] {
+  const models = [config.FREE_AI_FALLBACK_MODEL.trim()];
+  const visionModel = config.FREE_AI_FALLBACK_VISION_MODEL.trim();
+  if (visionModel && !models.includes(visionModel)) {
+    models.push(visionModel);
+  }
+  return models.filter(Boolean);
+}
+
 function getSubscriptionFields(subscription: {
   id?: string | null;
   status?: string | null;
@@ -1256,6 +1319,95 @@ fastify.get('/desktop/account', async (request, reply) => {
     ok: true,
     ...snapshot,
   };
+});
+
+fastify.get('/desktop/free-ai/v1/models', async (request, reply) => {
+  const desktopSession = await requireDesktopDeviceSession(request, reply);
+  if (!desktopSession) {
+    return { error: 'Unauthorized' };
+  }
+
+  if (!hostedFreeAiFallbackAvailable()) {
+    return buildHostedFreeAiUnavailableReply(reply);
+  }
+
+  reply.header('Cache-Control', 'no-store');
+  return {
+    object: 'list',
+    data: buildHostedFreeAiModelList().map((id) => ({
+      id,
+      object: 'model',
+      owned_by: 'gorkh',
+    })),
+  };
+});
+
+fastify.post('/desktop/free-ai/v1/chat/completions', async (request, reply) => {
+  const desktopSession = await requireDesktopDeviceSession(request, reply);
+  if (!desktopSession) {
+    return { error: 'Unauthorized' };
+  }
+
+  if (!hostedFreeAiFallbackAvailable()) {
+    return buildHostedFreeAiUnavailableReply(reply);
+  }
+
+  if (!(await enforceHttpRateLimit(
+    reply,
+    `user:${desktopSession.userId}:free-ai-fallback`,
+    config.FREE_AI_FALLBACK_DAILY_LIMIT,
+    86_400_000
+  ))) {
+    return;
+  }
+
+  const requestBody = ((request.body ?? {}) as Record<string, unknown>);
+  const upstreamBody = {
+    ...requestBody,
+    model: selectHostedFreeAiModel(requestBody),
+    stream: false,
+  };
+
+  let upstreamResponse: Response;
+  try {
+    upstreamResponse = await fetch(buildHostedFreeAiUpstreamUrl('chat/completions'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.FREE_AI_FALLBACK_API_KEY.trim().length > 0
+          ? { Authorization: `Bearer ${config.FREE_AI_FALLBACK_API_KEY}` }
+          : {}),
+      },
+      body: JSON.stringify(upstreamBody),
+    });
+  } catch (error) {
+    reply.status(502);
+    return reply.send({
+      error: `Hosted Free AI request failed: ${error instanceof Error ? error.message : String(error)}`,
+      code: 'FREE_AI_FALLBACK_UPSTREAM_ERROR',
+    });
+  }
+
+  const contentType = upstreamResponse.headers.get('content-type') || 'application/json';
+  const text = await upstreamResponse.text();
+  reply.status(upstreamResponse.status);
+  reply.header('Cache-Control', 'no-store');
+  reply.header('Content-Type', contentType);
+
+  if (!text) {
+    return reply.send({});
+  }
+
+  try {
+    return reply.send(JSON.parse(text));
+  } catch {
+    return reply.send({
+      error: text,
+      code: upstreamResponse.ok
+        ? 'FREE_AI_FALLBACK_INVALID_RESPONSE'
+        : 'FREE_AI_FALLBACK_UPSTREAM_ERROR',
+    });
+  }
 });
 
 fastify.post('/desktop/runs', async (request, reply) => {

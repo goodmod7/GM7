@@ -148,6 +148,13 @@ pub enum LocalAiCompatibilityDisposition {
     ExternalService,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalAiRuntimeOwnership {
+    Managed,
+    ExternalService,
+    NotRunning,
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedRuntimeBinary {
     path: PathBuf,
@@ -188,13 +195,21 @@ pub async fn runtime_status(state: &LocalAiRuntimeState) -> Result<LocalAiRuntim
         .unwrap_or(false);
     let running = is_service_running(LOCAL_AI_SERVICE_URL).await;
     let managed_child_running = managed_child_running(state);
-    let external_service_detected = running && !managed_child_running;
     let progress = install_progress(state);
     let metadata = read_metadata(&managed_runtime_dir);
+    let runtime_ownership = classify_runtime_ownership(
+        running,
+        managed_child_running,
+        metadata.as_ref().map(|value| value.runtime_source),
+    );
+    let external_service_detected =
+        matches!(runtime_ownership, LocalAiRuntimeOwnership::ExternalService);
     let last_error = state.last_error.lock().unwrap().clone();
 
     Ok(LocalAiRuntimeStatus {
-        managed_by_app: runtime_present || managed_child_running || metadata.is_some(),
+        managed_by_app: runtime_present
+            || metadata.is_some()
+            || matches!(runtime_ownership, LocalAiRuntimeOwnership::Managed),
         managed_runtime_dir: managed_runtime_dir.display().to_string(),
         runtime_binary_path: runtime_binary_path.map(|path| path.display().to_string()),
         runtime_present,
@@ -270,7 +285,12 @@ pub async fn compatibility_disposition(
     }
 
     let status = runtime_status(state).await?;
-    if status.external_service_detected && !managed_child_running(state) {
+    let runtime_ownership = classify_runtime_ownership(
+        status.runtime_running,
+        managed_child_running(state),
+        status.runtime_source,
+    );
+    if matches!(runtime_ownership, LocalAiRuntimeOwnership::ExternalService) {
         return Ok(LocalAiCompatibilityDisposition::ExternalService);
     }
 
@@ -954,6 +974,29 @@ fn ensure_managed_dirs(managed_dir: &Path) -> Result<(), String> {
 
 fn runtime_dir(managed_dir: &Path) -> PathBuf {
     managed_dir.join("runtime")
+}
+
+fn classify_runtime_ownership(
+    running: bool,
+    managed_child_running: bool,
+    runtime_source: Option<LocalAiRuntimeSource>,
+) -> LocalAiRuntimeOwnership {
+    if !running {
+        return LocalAiRuntimeOwnership::NotRunning;
+    }
+
+    if managed_child_running {
+        return LocalAiRuntimeOwnership::Managed;
+    }
+
+    match runtime_source {
+        Some(LocalAiRuntimeSource::Managed | LocalAiRuntimeSource::ExistingInstall) => {
+            LocalAiRuntimeOwnership::Managed
+        }
+        Some(LocalAiRuntimeSource::ExistingService) | None => {
+            LocalAiRuntimeOwnership::ExternalService
+        }
+    }
 }
 
 fn models_dir(managed_dir: &Path) -> PathBuf {
@@ -1990,6 +2033,36 @@ fn run_path_command_capture(program: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_running_service_with_managed_metadata_as_managed_runtime() {
+        assert_eq!(
+            classify_runtime_ownership(true, false, Some(LocalAiRuntimeSource::Managed)),
+            LocalAiRuntimeOwnership::Managed,
+            "persisted managed metadata should keep the runtime classified as app-managed even if the current process lost the live child handle"
+        );
+
+        assert_eq!(
+            classify_runtime_ownership(true, false, Some(LocalAiRuntimeSource::ExistingInstall)),
+            LocalAiRuntimeOwnership::Managed,
+            "an adopted existing install becomes app-managed after GORKH takes ownership"
+        );
+    }
+
+    #[test]
+    fn classifies_running_service_without_managed_metadata_as_external_runtime() {
+        assert_eq!(
+            classify_runtime_ownership(true, false, None),
+            LocalAiRuntimeOwnership::ExternalService,
+            "a running Ollama service without managed ownership metadata should remain external"
+        );
+
+        assert_eq!(
+            classify_runtime_ownership(true, false, Some(LocalAiRuntimeSource::ExistingService)),
+            LocalAiRuntimeOwnership::ExternalService,
+            "persisted existing-service metadata should remain external"
+        );
+    }
 
     #[test]
     fn detects_macos_metal_compatibility_failures_from_ollama_error_text() {

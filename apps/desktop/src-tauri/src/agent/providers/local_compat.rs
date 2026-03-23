@@ -1,6 +1,7 @@
 //! Local OpenAI-compatible provider (e.g., llama.cpp, vLLM)
 //!
-//! Similar to OpenAI provider but defaults to localhost and no API key required.
+//! Similar to the OpenAI provider but defaults to localhost and only sends
+//! Authorization when a runtime-specific bearer token is configured.
 
 use super::*;
 use serde_json::json;
@@ -9,14 +10,23 @@ use serde_json::json;
 pub struct LocalCompatProvider {
     endpoint: String,
     model: String,
+    api_key: Option<String>,
+    supports_vision: bool,
     client: reqwest::Client,
 }
 
 impl LocalCompatProvider {
-    pub fn new(endpoint: Option<String>, model: Option<String>) -> Self {
+    pub fn new(
+        endpoint: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+        supports_vision: Option<bool>,
+    ) -> Self {
         Self {
             endpoint: endpoint.unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string()),
             model: model.unwrap_or_else(|| "local-model".to_string()),
+            api_key,
+            supports_vision: supports_vision.unwrap_or(false),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -24,7 +34,16 @@ impl LocalCompatProvider {
         }
     }
 
-    /// Call local OpenAI-compatible API
+    fn auth_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.api_key.as_deref() {
+            Some(value) if !value.trim().is_empty() => {
+                request.header("Authorization", format!("Bearer {}", value))
+            }
+            _ => request,
+        }
+    }
+
+    /// Call OpenAI-compatible chat completions API
     async fn chat_completion(
         &self,
         system: &str,
@@ -35,9 +54,7 @@ impl LocalCompatProvider {
 
         let mut messages = vec![json!({"role": "system", "content": system})];
 
-        // Build user message
         let user_message = if let Some(img_b64) = image {
-            // Many local servers don't support vision, but try anyway
             json!({
                 "role": "user",
                 "content": [
@@ -63,8 +80,7 @@ impl LocalCompatProvider {
         });
 
         let response = self
-            .client
-            .post(&url)
+            .auth_request(self.client.post(&url))
             .json(&request_body)
             .send()
             .await
@@ -122,18 +138,16 @@ impl LlmProvider for LocalCompatProvider {
     }
 
     async fn is_available(&self) -> bool {
-        // Check if server is running
         let url = format!("{}/models", self.endpoint);
-        match self.client.get(&url).send().await {
+        match self.auth_request(self.client.get(&url)).send().await {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        // Assume local models have limited capabilities by default
         ProviderCapabilities {
-            supports_vision: false, // Most local servers don't support vision
+            supports_vision: self.supports_vision,
             supports_streaming: true,
             supports_functions: false,
             max_context_tokens: 8192,
@@ -158,18 +172,23 @@ impl LlmProvider for LocalCompatProvider {
         &self,
         request: ScreenAnalysisRequest,
     ) -> Result<String, ProviderError> {
-        // Most local servers don't support vision, so we describe the image in text
-        let system = r#"Analyze the described screenshot and provide structured observations in JSON format.
-Since you cannot see the image directly, the user has described it for you."#;
+        if !self.supports_vision {
+            return Err(ProviderError {
+                code: "VISION_NOT_SUPPORTED".to_string(),
+                message: format!("Model {} does not support vision", self.model),
+                is_retryable: false,
+            });
+        }
 
+        let system = r#"Analyze the screenshot and provide structured observations in JSON format."#;
         let user = format!(
-            "Goal: {}\n\nPrevious actions: {:?}\n\nScreenshot description: [Base64 image: {} bytes]\n\nProvide JSON analysis:",
-            request.goal,
-            request.previous_actions,
-            request.screenshot_base64.len()
+            "Goal: {}\n\nPrevious actions: {:?}\n\nAnalyze this screenshot and return JSON observations:",
+            request.goal, request.previous_actions
         );
 
-        let response = self.chat_completion(system, &user, None).await?;
+        let response = self
+            .chat_completion(system, &user, Some(&request.screenshot_base64))
+            .await?;
         Ok(response.content)
     }
 
@@ -194,6 +213,6 @@ Since you cannot see the image directly, the user has described it for you."#;
     }
 
     fn estimate_cost(&self, _input_tokens: usize, _output_tokens: usize) -> f64 {
-        0.0 // Local = free
+        0.0
     }
 }

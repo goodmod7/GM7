@@ -88,6 +88,8 @@ export interface StartAgentTaskOptions {
   credentialProvider?: string;
   providerBaseUrl?: string;
   providerModel?: string;
+  providerApiKey?: string;
+  providerSupportsVision?: boolean;
   displayId?: string;
   /** Structured GORKH app state injected for grounding. No sensitive data. */
   appContext?: string;
@@ -104,6 +106,8 @@ export async function startAgentTask(
     credentialProvider: options?.credentialProvider,
     providerBaseUrl: options?.providerBaseUrl,
     providerModel: options?.providerModel,
+    providerApiKey: options?.providerApiKey,
+    providerSupportsVision: options?.providerSupportsVision,
     displayId: options?.displayId,
     appContext: options?.appContext,
   });

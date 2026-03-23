@@ -70,7 +70,13 @@ interface ExecutionResult {
   error?: string;
 }
 
-function modelSupportsVision(provider: LlmProvider, model: string): boolean {
+function modelSupportsVision(settings: LlmSettings): boolean {
+  if (typeof settings.supportsVisionOverride === 'boolean') {
+    return settings.supportsVisionOverride;
+  }
+
+  const provider = settings.provider;
+  const model = settings.model;
   const normalized = model.trim().toLowerCase();
   if (!normalized) {
     return false;
@@ -758,7 +764,7 @@ export class AiAssistController {
       return null;
     }
 
-    if (!modelSupportsVision(settings.provider, settings.model)) {
+    if (!modelSupportsVision(settings)) {
       throw new Error('This task needs Vision Boost or a vision-capable model before the assistant can inspect the screen.');
     }
 
@@ -781,6 +787,7 @@ export class AiAssistController {
           maxRuntimeMinutes: this.options.constraints.maxRuntimeMinutes,
         },
         appContext: this.options.gorkhContext,
+        apiKeyOverride: settings.apiKeyOverride ?? null,
       },
     });
 

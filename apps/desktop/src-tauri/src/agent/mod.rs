@@ -64,6 +64,8 @@ pub struct AgentConfig {
     /// Optional provider API key for cloud backends
     #[serde(skip_serializing, default)]
     pub provider_api_key: Option<String>,
+    /// Optional explicit vision capability override for OpenAI-compatible runtimes
+    pub provider_supports_vision: Option<bool>,
 }
 
 impl Default for AgentConfig {
@@ -80,6 +82,7 @@ impl Default for AgentConfig {
             provider_model: None,
             display_id: "display-0".to_string(),
             provider_api_key: None,
+            provider_supports_vision: None,
         }
     }
 }
@@ -955,6 +958,8 @@ fn build_provider(config: &AgentConfig) -> Result<Box<dyn providers::LlmProvider
         ProviderType::LocalOpenAiCompat => Ok(Box::new(providers::LocalCompatProvider::new(
             config.provider_base_url.clone(),
             config.provider_model.clone(),
+            config.provider_api_key.clone(),
+            config.provider_supports_vision,
         ))),
         ProviderType::OpenAi => Ok(Box::new(providers::OpenAiProvider::new(
             config.provider_api_key.clone().ok_or_else(|| {

@@ -1,6 +1,6 @@
 [package]
 name = "ai-operator-desktop"
-version = "0.0.20"
+version = "0.0.21"
 description = "GORKH Desktop App"
 authors = ["you"]
 edition = "2021"

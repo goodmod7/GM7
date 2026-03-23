@@ -38,6 +38,10 @@ import { getDesktopAccount, revokeDesktopDevice, type DesktopAccountSnapshot } f
 import { getDesktopTaskBootstrap, type DesktopTaskBootstrap } from './lib/desktopTasks.js';
 import { parseDesktopError } from './lib/tauriError.js';
 import {
+  resolveHostedFreeAiBinding,
+  shouldRetryWithHostedFreeAiFallback,
+} from './lib/freeAiFallback.js';
+import {
   buildFreeAiSetupPreflightReport,
   ensureAssistantRunForMessage,
   interpretFreeAiSetupResponse,
@@ -46,7 +50,10 @@ import {
   type AssistantTaskConfirmation,
   type FreeAiSetupPreflightReport,
 } from './lib/chatTaskFlow.js';
-import type { AssistantConversationMessage } from './lib/assistantConversation.js';
+import type {
+  AssistantConversationMessage,
+  AssistantConversationTurnResult,
+} from './lib/assistantConversation.js';
 import { assistantConversationTurn } from './lib/assistantConversation.js';
 import {
   enableLocalAiVisionBoost,
@@ -349,6 +356,7 @@ function App() {
   const [desktopOverviewRefreshNonce, setDesktopOverviewRefreshNonce] = useState(0);
   const [deviceRevokeBusyId, setDeviceRevokeBusyId] = useState<string | null>(null);
   const [recentRuns, setRecentRuns] = useState<RunWithSteps[]>([]);
+  const [runLlmSettingsByRunId, setRunLlmSettingsByRunId] = useState<Record<string, LlmSettings>>({});
   const [localSettings, setLocalSettingsState] = useState<LocalSettingsState>(() => getSettings());
   const [autostartSupported, setAutostartSupported] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
@@ -1464,16 +1472,17 @@ function App() {
 
     assistantStartingRunIdRef.current = runId;
 
-    const effectiveSettings: LlmSettings = llmSettings.provider === DEFAULT_LLM_PROVIDER
-      ? (() => {
-          const binding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, goal);
-          return {
-            ...llmSettings,
-            baseUrl: binding.baseUrl,
-            model: binding.model,
-          };
-        })()
-      : llmSettings;
+    const effectiveSettings: LlmSettings = runLlmSettingsByRunId[runId]
+      ?? (llmSettings.provider === DEFAULT_LLM_PROVIDER
+        ? (() => {
+            const binding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, goal);
+            return {
+              ...llmSettings,
+              baseUrl: binding.baseUrl,
+              model: binding.model,
+            };
+          })()
+        : llmSettings);
     const providerReady = await hasLlMProviderConfigured(effectiveSettings.provider);
 
     if (!providerReady) {
@@ -1535,6 +1544,7 @@ function App() {
     localAiRecommendation,
     localAiStatus,
     primaryDisplayId,
+    runLlmSettingsByRunId,
   ]);
 
   // Handle server messages
@@ -1603,31 +1613,30 @@ function App() {
     }
 
     try {
+      let runtimeOverride: LlmSettings | null = null;
       if (llmSettings.provider === DEFAULT_LLM_PROVIDER && startingNewTask) {
+        const hostedFreeAiBinding = resolveHostedFreeAiBinding(runtimeConfig, sessionDeviceToken);
         const localTaskBinding = resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, trimmed);
-        if (localTaskBinding.requiresVisionBoost) {
-          setVisionBoostRequested(true);
-          setMessages((prev) => [
-            ...prev,
-            createChatItem(
-              'agent',
-              `This task likely needs screenshot understanding. Enable Vision Boost to let the local assistant inspect the screen with ${localTaskBinding.visionModel}.`
-            ),
-          ]);
-          return false;
+        const shouldForceHostedFallback = pendingTaskConfirmation?.goal === trimmed
+          && pendingTaskConfirmation.providerMode === 'hosted_free_ai';
+
+        if (shouldForceHostedFallback || localTaskBinding.requiresVisionBoost) {
+          runtimeOverride = hostedFreeAiBinding;
         }
 
-        const usage = readLocalAiTaskUsage(window.localStorage);
-        const taskAllowance = canStartManagedLocalTask(
-          getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing),
-          usage
-        );
-        if (!taskAllowance.allowed) {
-          setMessages((prev) => [
-            ...prev,
-            createChatItem('agent', taskAllowance.reason || 'Free local task limit reached for today.'),
-          ]);
-          return false;
+        if (!runtimeOverride) {
+          const usage = readLocalAiTaskUsage(window.localStorage);
+          const taskAllowance = canStartManagedLocalTask(
+            getLocalAiPlanPolicy(desktopBootstrap?.billing ?? desktopAccount?.billing),
+            usage
+          );
+          if (!taskAllowance.allowed) {
+            setMessages((prev) => [
+              ...prev,
+              createChatItem('agent', taskAllowance.reason || 'Free local task limit reached for today.'),
+            ]);
+            return false;
+          }
         }
       }
 
@@ -1640,9 +1649,27 @@ function App() {
         runtimeConfig,
         deviceToken: sessionDeviceToken,
       });
+      if (startingNewTask) {
+        setRunLlmSettingsByRunId((current) => {
+          if (runtimeOverride) {
+            return {
+              ...current,
+              [run.runId]: runtimeOverride,
+            };
+          }
+
+          if (!(run.runId in current)) {
+            return current;
+          }
+
+          const next = { ...current };
+          delete next[run.runId];
+          return next;
+        });
+      }
       setActiveRun(run);
       setRecentRuns((currentRuns) => upsertRunHistory(currentRuns, run));
-      if (llmSettings.provider === DEFAULT_LLM_PROVIDER && startingNewTask) {
+      if (llmSettings.provider === DEFAULT_LLM_PROVIDER && startingNewTask && !runtimeOverride) {
         setLocalAiTaskUsage(recordManagedLocalTaskStart(window.localStorage));
       }
 
@@ -1683,6 +1710,7 @@ function App() {
     localAiStatus,
     localSettings,
     llmSettings.provider,
+    pendingTaskConfirmation,
     permissionStatus,
     platform,
     providerConfigured,
@@ -1700,14 +1728,39 @@ function App() {
         const conversationSettings = llmSettings.provider === DEFAULT_LLM_PROVIDER
           ? resolveManagedLocalLlmBinding(localAiStatus, localAiRecommendation)
           : llmSettings;
+        const conversationMessages = toAssistantConversationMessages(conversationItems);
+        let usedHostedFreeAi = false;
+        let result: AssistantConversationTurnResult;
 
-        const result = await assistantConversationTurn({
-          provider: llmSettings.provider,
-          baseUrl: conversationSettings.baseUrl,
-          model: conversationSettings.model,
-          messages: toAssistantConversationMessages(conversationItems),
-          appContext: gorkhAppContext ?? undefined,
-        });
+        try {
+          result = await assistantConversationTurn({
+            provider: llmSettings.provider,
+            baseUrl: conversationSettings.baseUrl,
+            model: conversationSettings.model,
+            messages: conversationMessages,
+            appContext: gorkhAppContext ?? undefined,
+          });
+        } catch (error) {
+          if (
+            llmSettings.provider === DEFAULT_LLM_PROVIDER
+            && runtimeConfig
+            && sessionDeviceToken
+            && shouldRetryWithHostedFreeAiFallback(error)
+          ) {
+            const hostedFreeAiBinding = resolveHostedFreeAiBinding(runtimeConfig, sessionDeviceToken);
+            result = await assistantConversationTurn({
+              provider: hostedFreeAiBinding.provider,
+              baseUrl: hostedFreeAiBinding.baseUrl,
+              model: hostedFreeAiBinding.model,
+              messages: conversationMessages,
+              appContext: gorkhAppContext ?? undefined,
+              apiKeyOverride: hostedFreeAiBinding.apiKeyOverride,
+            });
+            usedHostedFreeAi = true;
+          } else {
+            throw error;
+          }
+        }
         // dispatchConfirmedAssistantTask stays on the explicit confirmation path below.
 
         if (assistantConversationRequestIdRef.current !== requestId) {
@@ -1726,6 +1779,23 @@ function App() {
           goal: result.goal,
           summary: result.summary,
           prompt: result.prompt,
+          providerMode: (() => {
+            if (usedHostedFreeAi) {
+              return 'hosted_free_ai';
+            }
+
+            if (
+              llmSettings.provider === DEFAULT_LLM_PROVIDER
+              && runtimeConfig
+              && sessionDeviceToken
+              && resolveManagedLocalTaskBinding(localAiStatus, localAiRecommendation, result.goal)
+                .requiresVisionBoost
+            ) {
+              return 'hosted_free_ai';
+            }
+
+            return 'local';
+          })(),
         });
         setMessages((prev) => [
           ...prev,
@@ -1755,6 +1825,8 @@ function App() {
     localAiRecommendation,
     localAiStatus,
     llmSettings,
+    runtimeConfig,
+    sessionDeviceToken,
   ]);
 
   const replayDeferredUserTask = useCallback((deferredTask: string) => {

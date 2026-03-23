@@ -13,6 +13,7 @@ export interface AssistantTaskConfirmation {
   goal: string;
   summary: string;
   prompt: string;
+  providerMode?: 'local' | 'hosted_free_ai';
 }
 
 export interface FreeAiSetupPreflightReport {

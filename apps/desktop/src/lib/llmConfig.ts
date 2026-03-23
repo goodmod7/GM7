@@ -13,6 +13,8 @@ export interface LlmSettings {
   provider: LlmProvider;
   baseUrl: string;
   model: string;
+  apiKeyOverride?: string;
+  supportsVisionOverride?: boolean;
 }
 
 export interface LlmProviderDefinition {

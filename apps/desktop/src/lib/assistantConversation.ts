@@ -23,6 +23,7 @@ interface AssistantConversationTurnParams {
   model: string;
   messages: AssistantConversationMessage[];
   appContext?: string | null;
+  apiKeyOverride?: string | null;
 }
 
 export async function assistantConversationTurn(
@@ -35,6 +36,7 @@ export async function assistantConversationTurn(
       model: params.model,
       messages: params.messages,
       appContext: params.appContext ?? null,
+      apiKeyOverride: params.apiKeyOverride ?? null,
     },
   }) as Promise<AssistantConversationTurnResult>;
 }

@@ -50,6 +50,12 @@ const configSchema = z.object({
   REDIS_URL: z.string().url().default('redis://localhost:6379'),
   RATE_LIMIT_BACKEND: z.enum(['redis', 'memory']).default('memory'),
   BILLING_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  FREE_AI_FALLBACK_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  FREE_AI_FALLBACK_BASE_URL: z.string().default(''),
+  FREE_AI_FALLBACK_MODEL: z.string().default(''),
+  FREE_AI_FALLBACK_VISION_MODEL: z.string().default(''),
+  FREE_AI_FALLBACK_API_KEY: z.string().default(''),
+  FREE_AI_FALLBACK_DAILY_LIMIT: z.string().transform((s) => parseInt(s, 10)).default('5'),
   RUN_RECOVERY_POLICY: z.enum(['fail', 'cancel']).default('fail'),
 });
 
@@ -101,6 +107,12 @@ function loadConfig() {
     REDIS_URL: process.env.REDIS_URL,
     RATE_LIMIT_BACKEND: process.env.RATE_LIMIT_BACKEND,
     BILLING_ENABLED: process.env.BILLING_ENABLED,
+    FREE_AI_FALLBACK_ENABLED: process.env.FREE_AI_FALLBACK_ENABLED,
+    FREE_AI_FALLBACK_BASE_URL: process.env.FREE_AI_FALLBACK_BASE_URL,
+    FREE_AI_FALLBACK_MODEL: process.env.FREE_AI_FALLBACK_MODEL,
+    FREE_AI_FALLBACK_VISION_MODEL: process.env.FREE_AI_FALLBACK_VISION_MODEL,
+    FREE_AI_FALLBACK_API_KEY: process.env.FREE_AI_FALLBACK_API_KEY,
+    FREE_AI_FALLBACK_DAILY_LIMIT: process.env.FREE_AI_FALLBACK_DAILY_LIMIT,
     RUN_RECOVERY_POLICY: process.env.RUN_RECOVERY_POLICY,
   };
 

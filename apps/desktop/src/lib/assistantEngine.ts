@@ -166,12 +166,19 @@ class LegacyAiAssistEngineAdapter implements AssistantEngineHandle {
 function mapAdvancedProvider(settings: LlmSettings): {
   provider: AdvancedProviderType;
   credentialProvider: string;
+  providerApiKey?: string;
+  providerSupportsVision?: boolean;
 } {
   switch (settings.provider) {
     case 'native_qwen_ollama':
       return { provider: 'native_qwen_ollama', credentialProvider: 'native_qwen_ollama' };
     case 'openai_compat':
-      return { provider: 'local_openai_compat', credentialProvider: 'openai_compat' };
+      return {
+        provider: 'local_openai_compat',
+        credentialProvider: 'openai_compat',
+        providerApiKey: settings.apiKeyOverride,
+        providerSupportsVision: settings.supportsVisionOverride,
+      };
     case 'claude':
       return { provider: 'claude', credentialProvider: 'claude' };
     default:
@@ -309,6 +316,8 @@ class AdvancedAssistantEngineAdapter implements AssistantEngineHandle {
         credentialProvider: mapped.credentialProvider,
         providerBaseUrl: settings.baseUrl,
         providerModel: settings.model,
+        providerApiKey: mapped.providerApiKey,
+        providerSupportsVision: mapped.providerSupportsVision,
         displayId: this.options.displayId,
         appContext: this.options.appContext,
       });

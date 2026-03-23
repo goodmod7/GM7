@@ -15,13 +15,35 @@ interface PendingTaskConfirmation {
   prompt: string;
 }
 
+interface PendingFreeAiSetup {
+  title: string;
+  report: {
+    summary: string;
+    details: string;
+    prompt: string;
+  };
+  retryLabel: string;
+  cancelLabel: string;
+  settingsLabel: string;
+  stage: 'approval' | 'installing' | 'error';
+  progressLabel: string | null;
+  statusMessage: string | null;
+  error: string | null;
+}
+
 interface ChatOverlayProps {
   messages: ChatItem[];
   status: ConnectionStatus;
   onSendMessage: (content: string) => void;
   busy?: boolean;
+  pendingFreeAiSetup?: PendingFreeAiSetup | null;
+  pendingFreeAiSetupBusy?: boolean;
   pendingTaskConfirmation?: PendingTaskConfirmation | null;
   pendingTaskConfirmationBusy?: boolean;
+  onApprovePendingFreeAiSetup?: () => void;
+  onRetryPendingFreeAiSetup?: () => void;
+  onCancelPendingFreeAiSetup?: () => void;
+  onOpenPendingFreeAiSetupSettings?: () => void;
   onConfirmPendingTask?: () => void;
   onCancelPendingTask?: () => void;
 }
@@ -31,8 +53,14 @@ export function ChatOverlay({
   status,
   onSendMessage,
   busy = false,
+  pendingFreeAiSetup = null,
+  pendingFreeAiSetupBusy = false,
   pendingTaskConfirmation = null,
   pendingTaskConfirmationBusy = false,
+  onApprovePendingFreeAiSetup,
+  onRetryPendingFreeAiSetup,
+  onCancelPendingFreeAiSetup,
+  onOpenPendingFreeAiSetupSettings,
   onConfirmPendingTask,
   onCancelPendingTask,
 }: ChatOverlayProps) {
@@ -45,7 +73,7 @@ export function ChatOverlay({
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, pendingFreeAiSetup, pendingTaskConfirmation]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -169,6 +197,103 @@ export function ChatOverlay({
           background: 'white',
         }}
       >
+        {pendingFreeAiSetup && (
+          <div
+            style={{
+              width: '100%',
+              marginBottom: '0.9rem',
+              padding: '0.95rem 1rem',
+              borderRadius: '14px',
+              background: pendingFreeAiSetup.stage === 'error' ? '#fff1f2' : '#eff6ff',
+              border: `1px solid ${pendingFreeAiSetup.stage === 'error' ? '#fda4af' : '#93c5fd'}`,
+              color: pendingFreeAiSetup.stage === 'error' ? '#9f1239' : '#1d4ed8',
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: '0.875rem' }}>{pendingFreeAiSetup.title}</div>
+            <div style={{ marginTop: '0.45rem', fontSize: '0.875rem', lineHeight: 1.5 }}>
+              {pendingFreeAiSetup.report.summary}
+            </div>
+            <div style={{ marginTop: '0.45rem', fontSize: '0.875rem', lineHeight: 1.5 }}>
+              {pendingFreeAiSetup.report.details}
+            </div>
+            <div style={{ marginTop: '0.45rem', fontSize: '0.875rem', lineHeight: 1.5 }}>
+              {pendingFreeAiSetup.report.prompt}
+            </div>
+            {(pendingFreeAiSetup.progressLabel || pendingFreeAiSetup.statusMessage) && (
+              <div style={{ marginTop: '0.55rem', fontSize: '0.82rem', color: pendingFreeAiSetup.stage === 'error' ? '#be123c' : '#1e40af' }}>
+                {pendingFreeAiSetup.progressLabel ? `${pendingFreeAiSetup.progressLabel}: ` : ''}
+                {pendingFreeAiSetup.statusMessage}
+              </div>
+            )}
+            {pendingFreeAiSetup.error && (
+              <div style={{ marginTop: '0.45rem', fontSize: '0.82rem', color: '#be123c' }}>
+                {pendingFreeAiSetup.error}
+              </div>
+            )}
+            <div style={{ marginTop: '0.35rem', fontSize: '0.78rem', color: pendingFreeAiSetup.stage === 'error' ? '#be123c' : '#1d4ed8' }}>
+              {pendingFreeAiSetup.stage === 'approval'
+                ? 'GORKH will wait for your approval before installing anything on this desktop.'
+                : pendingFreeAiSetup.stage === 'installing'
+                  ? 'The original request is saved and will resume automatically as soon as Free AI is ready.'
+                  : 'You can retry setup, cancel this saved task, or open Settings to choose another provider.'}
+            </div>
+            <div style={{ marginTop: '0.8rem', display: 'flex', gap: '0.65rem', flexWrap: 'wrap' }}>
+              {pendingFreeAiSetup.stage !== 'installing' && (
+                <button
+                  type="button"
+                  onClick={pendingFreeAiSetup.stage === 'error' ? onRetryPendingFreeAiSetup : onApprovePendingFreeAiSetup}
+                  disabled={pendingFreeAiSetupBusy}
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: '10px',
+                    border: '1px solid #0f172a',
+                    background: '#0f172a',
+                    color: 'white',
+                    cursor: pendingFreeAiSetupBusy ? 'not-allowed' : 'pointer',
+                    opacity: pendingFreeAiSetupBusy ? 0.7 : 1,
+                    fontWeight: 700,
+                  }}
+                >
+                  {pendingFreeAiSetupBusy
+                    ? 'Working...'
+                    : pendingFreeAiSetup.stage === 'error'
+                      ? pendingFreeAiSetup.retryLabel
+                      : 'Proceed'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onCancelPendingFreeAiSetup}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid #bfdbfe',
+                  background: 'white',
+                  color: '#1d4ed8',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                }}
+              >
+                {pendingFreeAiSetup.cancelLabel}
+              </button>
+              <button
+                type="button"
+                onClick={onOpenPendingFreeAiSetupSettings}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid #bfdbfe',
+                  background: 'white',
+                  color: '#1d4ed8',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                }}
+              >
+                {pendingFreeAiSetup.settingsLabel}
+              </button>
+            </div>
+          </div>
+        )}
         {pendingTaskConfirmation && (
           <div
             style={{
@@ -224,7 +349,7 @@ export function ChatOverlay({
                   fontWeight: 700,
                 }}
               >
-                {pendingTaskConfirmationBusy ? 'Starting…' : 'Proceed'}
+                {pendingTaskConfirmationBusy ? 'Starting...' : 'Proceed'}
               </button>
             </div>
           </div>

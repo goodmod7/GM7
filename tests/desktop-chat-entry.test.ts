@@ -133,7 +133,7 @@ test('desktop app seeds the greeting from onboarding copy and keeps fresh chat i
   );
   assert.match(
     appSource,
-    /handleSendMessage[\s\S]{0,2400}assistantConversationTurn[\s\S]{0,2400}dispatchConfirmedAssistantTask/,
+    /handleSendMessage[\s\S]{0,2600}assistantConversationTurn[\s\S]{0,2600}dispatchConfirmedAssistantTask/,
     'fresh chat should go through assistantConversationTurn before a confirmed task is dispatched'
   );
   assert.doesNotMatch(
@@ -158,8 +158,8 @@ test('desktop app seeds the greeting from onboarding copy and keeps fresh chat i
   );
   assert.match(
     appSource,
-    /if \(!trimmed \|\| assistantConversationBusy \|\| pendingTaskConfirmationBusy\)/,
-    'desktop app should reject new sends before appending a message when intake or confirmed task start is already busy'
+    /if \(!trimmed \|\| assistantConversationBusy \|\| pendingTaskConfirmationBusy(\s*\|\|\s*pendingFreeAiSetupBusy)?\)/,
+    'desktop app should reject new sends before appending a message when intake, setup, or confirmed task start is already busy'
   );
   assert.match(
     appSource,
@@ -168,13 +168,18 @@ test('desktop app seeds the greeting from onboarding copy and keeps fresh chat i
   );
   assert.match(
     appSource,
-    /busy=\{assistantConversationBusy \|\| pendingTaskConfirmationBusy\}/,
-    'desktop app should pass a busy signal into the chat surface while intake or task start is in flight'
+    /busy=\{assistantConversationBusy \|\| pendingTaskConfirmationBusy(\s*\|\|\s*pendingFreeAiSetupBusy)?\}/,
+    'desktop app should pass a busy signal into the chat surface while intake, setup, or task start is in flight'
   );
   assert.match(
     chatOverlaySource,
     /pendingTaskConfirmation|onConfirmPendingTask|onCancelPendingTask/,
     'main desktop chat should render explicit proceed and cancel controls while confirmation is pending'
+  );
+  assert.match(
+    chatOverlaySource,
+    /pendingFreeAiSetup|onApprovePendingFreeAiSetup|onRetryPendingFreeAiSetup/,
+    'main desktop chat should expose the Free AI approval and recovery controls from the same surface'
   );
   assert.match(
     chatOverlaySource,
@@ -184,7 +189,7 @@ test('desktop app seeds the greeting from onboarding copy and keeps fresh chat i
   assert.match(
     chatOverlaySource,
     /const canSend = status === 'connected' && !busy && input\.trim\(\)|disabled=\{status !== 'connected' \|\| busy\}/,
-    'chat overlay should disable sending while intake or confirmed task start is busy'
+    'chat overlay should disable sending while intake, setup, or confirmed task start is busy'
   );
 });
 

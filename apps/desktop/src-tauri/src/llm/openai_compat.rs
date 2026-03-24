@@ -64,6 +64,23 @@ fn is_hosted_free_ai_fallback(base_url: &str) -> bool {
     base_url.trim_end_matches('/').ends_with("/desktop/free-ai/v1")
 }
 
+fn build_openai_compat_client(
+    base_url: &str,
+    timeout_secs: u64,
+) -> Result<Client, reqwest::Error> {
+    let mut builder = Client::builder().timeout(std::time::Duration::from_secs(timeout_secs));
+
+    // Render terminates the hosted desktop fallback behind an HTTP/2 edge that has shown
+    // sporadic transport failures from packaged macOS reqwest clients. Pinning this path
+    // to HTTP/1.1 keeps the authenticated desktop fallback stable without affecting other
+    // OpenAI-compatible providers.
+    if is_hosted_free_ai_fallback(base_url) {
+        builder = builder.http1_only();
+    }
+
+    builder.build()
+}
+
 fn openai_compat_connection_message(base_url: &str, error: &reqwest::Error) -> String {
     if is_hosted_free_ai_fallback(base_url) {
         format!("Failed to connect to Hosted Free AI fallback: {}", error)
@@ -116,9 +133,7 @@ impl LlmProvider for OpenAiCompatProvider {
         &self,
         params: &ProposalParams,
     ) -> Result<AgentProposal, LlmError> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
+        let client = build_openai_compat_client(&params.base_url, 60)
             .map_err(|e| LlmError {
                 code: "CLIENT_INIT_FAILED".to_string(),
                 message: format!("Failed to create HTTP client: {}", e),
@@ -242,9 +257,7 @@ impl LlmProvider for OpenAiCompatProvider {
         &self,
         params: &ConversationTurnParams,
     ) -> Result<ConversationTurnResult, LlmError> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
+        let client = build_openai_compat_client(&params.base_url, 60)
             .map_err(|e| LlmError {
                 code: "CLIENT_INIT_FAILED".to_string(),
                 message: format!("Failed to create HTTP client: {}", e),

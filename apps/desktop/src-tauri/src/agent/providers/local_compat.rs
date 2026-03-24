@@ -6,6 +6,63 @@
 use super::*;
 use serde_json::json;
 
+fn is_hosted_free_ai_fallback_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .trim_end_matches('/')
+        .ends_with("/desktop/free-ai/v1")
+}
+
+fn build_local_compat_client(endpoint: &str) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120));
+
+    // Keep the authenticated desktop fallback on HTTP/1.1 to avoid the packaged macOS
+    // transport failures seen against the Render proxy edge.
+    if is_hosted_free_ai_fallback_endpoint(endpoint) {
+        builder = builder.http1_only();
+    }
+
+    builder.build().unwrap_or_default()
+}
+
+fn local_compat_connection_message(endpoint: &str, error: &reqwest::Error) -> String {
+    if is_hosted_free_ai_fallback_endpoint(endpoint) {
+        format!("Failed to connect to Hosted Free AI fallback: {}", error)
+    } else {
+        format!("Failed to connect to local server: {}", error)
+    }
+}
+
+fn local_compat_api_error_message(
+    endpoint: &str,
+    status: reqwest::StatusCode,
+    text: &str,
+) -> String {
+    if is_hosted_free_ai_fallback_endpoint(endpoint) {
+        if status.as_u16() == 401 {
+            "Hosted Free AI fallback requires desktop sign-in. Sign out and sign back in, then try again."
+                .to_string()
+        } else if status.as_u16() == 404 {
+            format!(
+                "Hosted Free AI fallback returned 404. Ensure the desktop API exposes /desktop/free-ai/v1/chat/completions. Error: {}",
+                text
+            )
+        } else {
+            format!("Hosted Free AI fallback error {}: {}", status, text)
+        }
+    } else {
+        format!("Local API returned {}: {}", status, text)
+    }
+}
+
+fn local_compat_parse_error_message(endpoint: &str, error: &reqwest::Error) -> String {
+    if is_hosted_free_ai_fallback_endpoint(endpoint) {
+        format!("Failed to parse Hosted Free AI fallback response: {}", error)
+    } else {
+        format!("Failed to parse response: {}", error)
+    }
+}
+
 /// Local OpenAI-compatible provider
 pub struct LocalCompatProvider {
     endpoint: String,
@@ -22,15 +79,13 @@ impl LocalCompatProvider {
         api_key: Option<String>,
         supports_vision: Option<bool>,
     ) -> Self {
+        let resolved_endpoint = endpoint.unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string());
         Self {
-            endpoint: endpoint.unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string()),
+            endpoint: resolved_endpoint.clone(),
             model: model.unwrap_or_else(|| "local-model".to_string()),
             api_key,
             supports_vision: supports_vision.unwrap_or(false),
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            client: build_local_compat_client(&resolved_endpoint),
         }
     }
 
@@ -86,7 +141,7 @@ impl LocalCompatProvider {
             .await
             .map_err(|e| ProviderError {
                 code: "NETWORK_ERROR".to_string(),
-                message: format!("Failed to connect to local server: {}", e),
+                message: local_compat_connection_message(&self.endpoint, &e),
                 is_retryable: true,
             })?;
 
@@ -95,14 +150,14 @@ impl LocalCompatProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(ProviderError {
                 code: "LOCAL_API_ERROR".to_string(),
-                message: format!("Local API returned {}: {}", status, text),
+                message: local_compat_api_error_message(&self.endpoint, status, &text),
                 is_retryable: status.is_server_error(),
             });
         }
 
         let result: serde_json::Value = response.json().await.map_err(|e| ProviderError {
             code: "PARSE_ERROR".to_string(),
-            message: format!("Failed to parse response: {}", e),
+            message: local_compat_parse_error_message(&self.endpoint, &e),
             is_retryable: false,
         })?;
 

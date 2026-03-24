@@ -101,6 +101,7 @@ test('desktop app and local-compatible provider keep a hosted Free AI execution 
   const aiAssistSource = readFileSync('apps/desktop/src/lib/aiAssist.ts', 'utf8');
   const assistantEngineSource = readFileSync('apps/desktop/src/lib/assistantEngine.ts', 'utf8');
   const settingsSource = readFileSync('apps/desktop/src/components/SettingsPanel.tsx', 'utf8');
+  const openAiCompatSource = readFileSync('apps/desktop/src-tauri/src/llm/openai_compat.rs', 'utf8');
   const localCompatSource = readFileSync('apps/desktop/src-tauri/src/agent/providers/local_compat.rs', 'utf8');
 
   assert.match(
@@ -128,6 +129,12 @@ test('desktop app and local-compatible provider keep a hosted Free AI execution 
   );
 
   assert.match(
+    openAiCompatSource,
+    /http1_only/,
+    'hosted Free AI intake requests should pin the Rust HTTP client to HTTP/1.1 for the Render fallback proxy'
+  );
+
+  assert.match(
     aiAssistSource,
     /apiKeyOverride|supportsVisionOverride/,
     'legacy AI Assist runtime settings should accept hosted fallback auth and vision overrides'
@@ -149,5 +156,11 @@ test('desktop app and local-compatible provider keep a hosted Free AI execution 
     localCompatSource,
     /Some\(&request\.screenshot_base64\)/,
     'local-compatible Rust provider should send the actual screenshot to hosted vision backends'
+  );
+
+  assert.match(
+    localCompatSource,
+    /http1_only/,
+    'hosted Free AI execution requests should pin the Rust HTTP client to HTTP/1.1 for the Render fallback proxy'
   );
 });

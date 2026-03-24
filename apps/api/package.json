@@ -1,6 +1,6 @@
 {
   "name": "@ai-operator/api",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

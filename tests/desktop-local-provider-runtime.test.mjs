@@ -23,8 +23,18 @@ test('local providers in llm_propose_next_action do not require an API key', () 
 
   assert.match(
     rustSource,
-    /match params\.provider\.as_str\(\)/,
+    /fn resolve_llm_api_key\(provider: &str\) -> Result<String, ProposalError>/,
+    'desktop LLM bridge should centralize key handling by provider type'
+  );
+  assert.match(
+    rustSource,
+    /match provider \{/,
     'desktop LLM bridge should branch key handling by provider type'
+  );
+  assert.match(
+    rustSource,
+    /resolve_llm_api_key\(&params\.provider\)\?/,
+    'llm_propose_next_action should use the shared provider key resolver'
   );
   assert.match(
     rustSource,

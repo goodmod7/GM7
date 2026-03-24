@@ -60,6 +60,56 @@ struct OpenAiCompatResponseMessage {
     content: String,
 }
 
+fn is_hosted_free_ai_fallback(base_url: &str) -> bool {
+    base_url.trim_end_matches('/').ends_with("/desktop/free-ai/v1")
+}
+
+fn openai_compat_connection_message(base_url: &str, error: &reqwest::Error) -> String {
+    if is_hosted_free_ai_fallback(base_url) {
+        format!("Failed to connect to Hosted Free AI fallback: {}", error)
+    } else {
+        format!("Failed to connect to local LLM server: {}", error)
+    }
+}
+
+fn openai_compat_api_error_message(base_url: &str, status: reqwest::StatusCode, text: &str) -> String {
+    if is_hosted_free_ai_fallback(base_url) {
+        if status.as_u16() == 404 {
+            format!(
+                "Hosted Free AI fallback returned 404. Ensure the desktop API exposes /desktop/free-ai/v1/chat/completions. Error: {}",
+                text
+            )
+        } else if status.as_u16() == 401 {
+            "Hosted Free AI fallback requires desktop sign-in. Sign out and sign back in, then try again."
+                .to_string()
+        } else {
+            format!("Hosted Free AI fallback error {}: {}", status, text)
+        }
+    } else if status.as_u16() == 404 {
+        format!("Local server returned 404. Ensure the server supports OpenAI-compatible endpoints at /v1/chat/completions. Error: {}", text)
+    } else if status.as_u16() == 401 {
+        "Local server requires authentication. If your server needs an API key, enter it above.".to_string()
+    } else {
+        format!("Local server error {}: {}", status, text)
+    }
+}
+
+fn openai_compat_parse_error_message(base_url: &str, error: &reqwest::Error) -> String {
+    if is_hosted_free_ai_fallback(base_url) {
+        format!("Failed to parse response from Hosted Free AI fallback: {}", error)
+    } else {
+        format!("Failed to parse response from local server: {}", error)
+    }
+}
+
+fn openai_compat_empty_response_message(base_url: &str) -> String {
+    if is_hosted_free_ai_fallback(base_url) {
+        "Hosted Free AI fallback returned no response".to_string()
+    } else {
+        "No response from local LLM".to_string()
+    }
+}
+
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiCompatProvider {
     async fn propose_next_action(
@@ -151,22 +201,14 @@ impl LlmProvider for OpenAiCompatProvider {
                 };
                 LlmError {
                     code: code.to_string(),
-                    message: format!("Failed to connect to local LLM server: {}", e),
+                    message: openai_compat_connection_message(&params.base_url, &e),
                 }
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-
-            // Provide helpful error messages for common issues
-            let message = if status.as_u16() == 404 {
-                format!("Local server returned 404. Ensure the server supports OpenAI-compatible endpoints at /v1/chat/completions. Error: {}", text)
-            } else if status.as_u16() == 401 {
-                "Local server requires authentication. If your server needs an API key, enter it above.".to_string()
-            } else {
-                format!("Local server error {}: {}", status, text)
-            };
+            let message = openai_compat_api_error_message(&params.base_url, status, &text);
 
             return Err(LlmError {
                 code: "API_ERROR".to_string(),
@@ -177,7 +219,7 @@ impl LlmProvider for OpenAiCompatProvider {
         let compat_response: OpenAiCompatResponse =
             response.json().await.map_err(|e| LlmError {
                 code: "PARSE_ERROR".to_string(),
-                message: format!("Failed to parse response from local server: {}", e),
+                message: openai_compat_parse_error_message(&params.base_url, &e),
             })?;
 
         let content = compat_response
@@ -187,7 +229,7 @@ impl LlmProvider for OpenAiCompatProvider {
             .map(|c| c.message.content)
             .ok_or_else(|| LlmError {
                 code: "EMPTY_RESPONSE".to_string(),
-                message: "No response from local LLM".to_string(),
+                message: openai_compat_empty_response_message(&params.base_url),
             })?;
 
         // Parse the JSON response
@@ -253,20 +295,14 @@ impl LlmProvider for OpenAiCompatProvider {
                 };
                 LlmError {
                     code: code.to_string(),
-                    message: format!("Failed to connect to local LLM server: {}", e),
+                    message: openai_compat_connection_message(&params.base_url, &e),
                 }
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            let message = if status.as_u16() == 404 {
-                format!("Local server returned 404. Ensure the server supports OpenAI-compatible endpoints at /v1/chat/completions. Error: {}", text)
-            } else if status.as_u16() == 401 {
-                "Local server requires authentication. If your server needs an API key, enter it above.".to_string()
-            } else {
-                format!("Local server error {}: {}", status, text)
-            };
+            let message = openai_compat_api_error_message(&params.base_url, status, &text);
 
             return Err(LlmError {
                 code: "API_ERROR".to_string(),
@@ -277,7 +313,7 @@ impl LlmProvider for OpenAiCompatProvider {
         let compat_response: OpenAiCompatResponse =
             response.json().await.map_err(|e| LlmError {
                 code: "PARSE_ERROR".to_string(),
-                message: format!("Failed to parse response from local server: {}", e),
+                message: openai_compat_parse_error_message(&params.base_url, &e),
             })?;
 
         let content = compat_response
@@ -287,7 +323,7 @@ impl LlmProvider for OpenAiCompatProvider {
             .map(|c| c.message.content)
             .ok_or_else(|| LlmError {
                 code: "EMPTY_RESPONSE".to_string(),
-                message: "No response from local LLM".to_string(),
+                message: openai_compat_empty_response_message(&params.base_url),
             })?;
 
         super::parse_json_response::<ConversationTurnResult>(&content, "conversation turn")

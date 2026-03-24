@@ -4064,6 +4064,8 @@ function App() {
           onExportDiagnostics={handleExportDiagnostics}
           diagnosticsStatus={diagnosticsStatus}
           overviewPanels={settingsOperationalPanels}
+          runtimeConfig={runtimeConfig}
+          sessionDeviceToken={sessionDeviceToken}
         />
       )}
     </div>

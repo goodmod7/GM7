@@ -28,6 +28,42 @@ export function resolveHostedFreeAiBinding(
   };
 }
 
+export async function testHostedFreeAiFallback(
+  runtimeConfig: DesktopApiRuntimeConfig,
+  deviceToken: string
+): Promise<void> {
+  const response = await fetch(`${buildHostedFreeAiBaseUrl(runtimeConfig)}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${deviceToken}`,
+    },
+    body: JSON.stringify({
+      model: HOSTED_FREE_AI_MODEL,
+      messages: [
+        {
+          role: 'user',
+          content: 'Reply with the single word OK.',
+        },
+      ],
+    }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(
+      typeof body?.error === 'string'
+        ? body.error
+        : `Hosted Free AI fallback test failed (${response.status}).`
+    );
+  }
+
+  const content = body?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    throw new Error('Hosted Free AI fallback returned an empty response.');
+  }
+}
+
 export function shouldRetryWithHostedFreeAiFallback(error: unknown): boolean {
   const parsed = parseDesktopError(error, 'The assistant could not respond right now.');
   const normalizedCode = parsed.code?.trim().toUpperCase() || '';

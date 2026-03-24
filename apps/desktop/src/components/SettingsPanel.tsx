@@ -28,6 +28,11 @@ import {
   getDesktopUpdaterStatusMessage,
   type DesktopUpdaterState,
 } from '../lib/desktopUpdater.js';
+import type { DesktopApiRuntimeConfig } from '../lib/desktopRuntimeConfig.js';
+import {
+  shouldRetryWithHostedFreeAiFallback,
+  testHostedFreeAiFallback,
+} from '../lib/freeAiFallback.js';
 import { parseDesktopError } from '../lib/tauriError.js';
 import { BrandWordmark } from './BrandWordmark.js';
 
@@ -61,6 +66,8 @@ interface SettingsPanelProps {
   onExportDiagnostics: () => void | Promise<void>;
   diagnosticsStatus?: string | null;
   overviewPanels?: ReactNode;
+  runtimeConfig?: DesktopApiRuntimeConfig | null;
+  sessionDeviceToken?: string | null;
 }
 
 export function SettingsPanel({
@@ -89,6 +96,8 @@ export function SettingsPanel({
   onExportDiagnostics,
   diagnosticsStatus,
   overviewPanels,
+  runtimeConfig = null,
+  sessionDeviceToken = null,
 }: SettingsPanelProps) {
   const settings = llmSettings;
   const providerDefinition = getLlmProviderDefinition(settings.provider);
@@ -97,6 +106,7 @@ export function SettingsPanel({
   const providerOptions = selectedProviderVisible
     ? supportedProviders
     : [providerDefinition, ...supportedProviders.filter((provider) => provider.provider !== settings.provider)];
+  const isManagedFreeAiProvider = settings.provider === 'native_qwen_ollama';
   const [apiKey, setApiKey] = useState('');
   const [hasKey, setHasKey] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -258,6 +268,35 @@ export function SettingsPanel({
         setTestResult({ success: false, message: `Error: ${result.message}` });
       }
     } catch (e) {
+      if (isManagedFreeAiProvider && shouldRetryWithHostedFreeAiFallback(e)) {
+        if (runtimeConfig && sessionDeviceToken) {
+          try {
+            await testHostedFreeAiFallback(runtimeConfig, sessionDeviceToken);
+            setTestResult({
+              success: true,
+              message: 'Free AI local engine is unavailable right now, but the hosted fallback is ready.',
+            });
+            return;
+          } catch (hostedError) {
+            const parsedHostedError = parseDesktopError(
+              hostedError,
+              'Hosted Free AI fallback test failed'
+            );
+            setTestResult({
+              success: false,
+              message: `Free AI local engine is unavailable, and the hosted fallback is not ready: ${parsedHostedError.message}`,
+            });
+            return;
+          }
+        }
+
+        setTestResult({
+          success: false,
+          message: 'Free AI local engine is unavailable. Sign in to let GORKH verify the hosted fallback.',
+        });
+        return;
+      }
+
       const parsedError = parseDesktopError(e, 'Test failed');
       const diagnosticText = [parsedError.code, parsedError.message].filter(Boolean).join(' ');
       if (parsedError.code === 'NO_API_KEY' || diagnosticText.includes('NO_API_KEY')) {
@@ -392,7 +431,7 @@ export function SettingsPanel({
             🤖 AI Assist Configuration
           </h3>
           <p style={{ margin: '0 0 1rem', fontSize: '0.875rem', color: '#666' }}>
-            Configure the assistant model. Launch beta officially supports Free AI, OpenAI, Claude, and Custom OpenAI-compatible endpoints. API keys stay in the OS keychain and are never sent to the server.
+            Configure the assistant model. Launch beta officially supports Free AI, OpenAI, and Claude. API keys stay in the OS keychain and are never sent to the server.
           </p>
 
           {/* Provider */}
@@ -439,53 +478,71 @@ export function SettingsPanel({
             >
               <strong>Compatibility provider</strong>
               <p style={{ margin: '0.5rem 0 0', fontSize: '0.8rem' }}>
-                {providerDefinition.label} remains available for existing setups, but it is hidden from the beta provider menu. For external beta, GORKH officially supports Free AI, OpenAI, Claude, and Custom OpenAI-compatible endpoints in the main assistant flow.
+                {providerDefinition.label} remains available for existing setups, but it is hidden from the beta provider menu. For external beta, GORKH officially supports Free AI, OpenAI, and Claude in the main assistant flow.
               </p>
             </div>
           )}
 
-          {/* Base URL */}
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem', color: '#333' }}>
-              Base URL
-            </label>
-            <input
-              type="text"
-              value={settings.baseUrl}
-              onChange={(e) => onLlmSettingsChange({ ...settings, baseUrl: e.target.value })}
-              placeholder={providerDefinition.baseUrl}
+          {isManagedFreeAiProvider ? (
+            <div
               style={{
-                width: '100%',
-                padding: '0.5rem',
-                borderRadius: '4px',
-                border: '1px solid #ddd',
+                marginBottom: '1rem',
+                padding: '0.9rem 1rem',
+                backgroundColor: '#f8fafc',
+                border: '1px solid #e2e8f0',
+                borderRadius: '8px',
                 fontSize: '0.875rem',
+                color: '#334155',
               }}
-            />
-          </div>
+            >
+              Free AI is managed for you. GORKH runs locally on your Mac first and, when you are signed in, can quietly use the secure hosted fallback if the local engine is unavailable.
+            </div>
+          ) : (
+            <>
+              {/* Base URL */}
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem', color: '#333' }}>
+                  Base URL
+                </label>
+                <input
+                  type="text"
+                  value={settings.baseUrl}
+                  onChange={(e) => onLlmSettingsChange({ ...settings, baseUrl: e.target.value })}
+                  placeholder={providerDefinition.baseUrl}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    borderRadius: '4px',
+                    border: '1px solid #ddd',
+                    fontSize: '0.875rem',
+                  }}
+                />
+              </div>
 
-          {/* Model */}
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem', color: '#333' }}>
-              Model
-            </label>
-            <input
-              type="text"
-              value={settings.model}
-              onChange={(e) => onLlmSettingsChange({ ...settings, model: e.target.value })}
-              placeholder={providerDefinition.model}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                borderRadius: '4px',
-                border: '1px solid #ddd',
-                fontSize: '0.875rem',
-              }}
-            />
-            <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-              Default: {providerDefinition.model}
-            </p>
-          </div>
+              {/* Model */}
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.875rem', marginBottom: '0.25rem', color: '#333' }}>
+                  Model
+                </label>
+                <input
+                  type="text"
+                  value={settings.model}
+                  onChange={(e) => onLlmSettingsChange({ ...settings, model: e.target.value })}
+                  placeholder={providerDefinition.model}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem',
+                    borderRadius: '4px',
+                    border: '1px solid #ddd',
+                    fontSize: '0.875rem',
+                  }}
+                />
+                <p style={{ margin: '0.25rem 0 0', fontSize: '0.75rem', color: '#666' }}>
+                  Default: {providerDefinition.model}
+                </p>
+              </div>
+            </>
+          )}
 
           {/* API Key - only show for cloud providers */}
           {providerRequiresApiKey(settings.provider) && (

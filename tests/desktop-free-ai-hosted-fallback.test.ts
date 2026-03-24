@@ -47,6 +47,52 @@ test('desktop hosted Free AI helper resolves the authenticated OpenAI-compatible
     false,
     'remote provider failures should not recursively trigger hosted fallback'
   );
+
+  const originalFetch = globalThis.fetch;
+  let captured:
+    | {
+        input: string;
+        init: RequestInit | undefined;
+      }
+    | undefined;
+
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    captured = {
+      input: typeof input === 'string' ? input : input.toString(),
+      init,
+    };
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: 'OK.',
+            },
+          },
+        ],
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  try {
+    await imported.testHostedFreeAiFallback(runtimeConfig, 'desktop-device-token');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    captured?.input,
+    'https://api.example.com/desktop/free-ai/v1/chat/completions',
+    'desktop hosted fallback test should hit the authenticated chat completions route'
+  );
+  assert.match(
+    String((captured?.init?.headers as Record<string, string> | undefined)?.Authorization),
+    /^Bearer desktop-device-token$/,
+    'desktop hosted fallback test should authenticate with the desktop device token'
+  );
 });
 
 test('desktop app and local-compatible provider keep a hosted Free AI execution path with vision enabled', () => {
@@ -54,6 +100,7 @@ test('desktop app and local-compatible provider keep a hosted Free AI execution 
   const taskFlowSource = readFileSync('apps/desktop/src/lib/chatTaskFlow.ts', 'utf8');
   const aiAssistSource = readFileSync('apps/desktop/src/lib/aiAssist.ts', 'utf8');
   const assistantEngineSource = readFileSync('apps/desktop/src/lib/assistantEngine.ts', 'utf8');
+  const settingsSource = readFileSync('apps/desktop/src/components/SettingsPanel.tsx', 'utf8');
   const localCompatSource = readFileSync('apps/desktop/src-tauri/src/agent/providers/local_compat.rs', 'utf8');
 
   assert.match(
@@ -66,6 +113,18 @@ test('desktop app and local-compatible provider keep a hosted Free AI execution 
     appSource,
     /resolveHostedFreeAiBinding|shouldRetryWithHostedFreeAiFallback/,
     'App.tsx should resolve and retry through the hosted Free AI fallback path'
+  );
+
+  assert.match(
+    appSource,
+    /runtimeConfig=\{runtimeConfig\}[\s\S]*sessionDeviceToken=\{sessionDeviceToken\}/,
+    'settings panel should receive the signed-in runtime and device token needed to test hosted fallback'
+  );
+
+  assert.match(
+    settingsSource,
+    /testHostedFreeAiFallback|shouldRetryWithHostedFreeAiFallback/,
+    'settings should test Free AI through the hidden hosted fallback when local runtime errors qualify'
   );
 
   assert.match(

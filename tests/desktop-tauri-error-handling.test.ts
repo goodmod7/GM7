@@ -40,6 +40,7 @@ test('desktop parses structured Tauri errors into code and message fields', asyn
 test('desktop chat and settings use the shared Tauri error parser for user-facing failures', () => {
   const appSource = readFileSync('apps/desktop/src/App.tsx', 'utf8');
   const settingsSource = readFileSync('apps/desktop/src/components/SettingsPanel.tsx', 'utf8');
+  const compatSource = readFileSync('apps/desktop/src-tauri/src/llm/openai_compat.rs', 'utf8');
 
   assert.match(
     appSource,
@@ -55,5 +56,10 @@ test('desktop chat and settings use the shared Tauri error parser for user-facin
     settingsSource,
     /parsedError\.code === 'LOCAL_AI_COMPATIBILITY_ERROR'/,
     'settings should surface managed Free AI compatibility failures directly instead of wrapping them in generic test-copy'
+  );
+  assert.match(
+    compatSource,
+    /Hosted Free AI fallback requires desktop sign-in|Hosted Free AI fallback returned 404/,
+    'hosted fallback errors should use hosted wording instead of generic local-server wording'
   );
 });

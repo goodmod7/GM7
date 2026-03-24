@@ -131,7 +131,6 @@ const LAUNCH_PROVIDER_ORDER: LlmProvider[] = [
   'native_qwen_ollama',
   'openai',
   'claude',
-  'openai_compat',
 ];
 
 export function isLlmProvider(value: string | undefined | null): value is LlmProvider {

@@ -7,6 +7,10 @@
     "core:app:allow-version",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "desktop-ipc"
+    "desktop-ipc",
+    "updater:allow-check",
+    "updater:allow-download",
+    "updater:allow-install",
+    "process:allow-restart"
   ]
 }
